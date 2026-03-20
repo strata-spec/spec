@@ -1,0 +1,111 @@
+smif_version: "0.1.0"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Financial Risk — Corrections Overlay
+#
+# This file contains human-authored corrections to the inferred semantic.yaml.
+# These corrections take unconditional precedence at serve time.
+# Re-running inference (strata init) will never modify this file.
+#
+# Corrections in this file:
+#   corr_001  — Description override on net_exposure_usd (LLM missed the cross-date
+#               summing caveat and the null-on-missing-data behaviour)
+#   corr_002  — Join override on positions_to_desk_limits (inferred join was missing
+#               the soft-delete filter on desk_limits)
+#   corr_003  — Suppression of traders.employee_id (PII, must not be served to agents)
+#   corr_004  — confidence_override on limit_breach concept (human-authored, should be 1.0)
+#   corr_005  — llm_suggested: pending review (agent proposed adding a required filter
+#               to gross_notional metric for non-zero quantity)
+# ─────────────────────────────────────────────────────────────────────────────
+
+corrections:
+
+  - correction_id: "corr_001"
+    target_type: column
+    target_id: "positions.net_exposure_usd"
+    correction_type: description_override
+    new_value: >
+      Calculated net exposure in USD for this position as of market close. Long positions are
+      positive, short positions are negative. Values are post-netting within the same instrument
+      on the same desk. Do not sum across instruments without grouping by instrument_id first —
+      summing across instruments gives portfolio-level net exposure which is a different concept.
+      Never sum across business_date without explicit instruction from the user; summing across
+      dates gives all-period cumulative exposure, which is rarely the intended metric.
+      NULL indicates the position value could not be calculated due to missing market data
+      (e.g. illiquid instruments at month-end). Always expressed in USD regardless of instrument
+      currency; FX conversion is applied upstream by the position-keeping system.
+    reason: >
+      LLM-inferred description omitted two critical caveats: (1) the prohibition on cross-date
+      summing without explicit instruction, and (2) the meaning of NULL values. Both cause
+      incorrect SQL in practice — agents were summing across all dates and silently excluding
+      NULL-valued positions without flagging the data quality issue.
+    source: user
+    status: approved
+    author: "alice@riskco.com"
+    timestamp: "2026-03-21T09:14:00Z"
+
+  - correction_id: "corr_002"
+    target_type: relationship
+    target_id: "positions_to_desk_limits"
+    correction_type: join_override
+    new_value: >
+      positions.desk_id = desk_limits.desk_id
+      AND positions.business_date = desk_limits.effective_date
+      AND desk_limits.limit_type = 'net'
+      AND desk_limits.deleted_at IS NULL
+    reason: >
+      Log-inferred join was missing two conditions: the soft-delete filter on desk_limits
+      (causing superseded limits to be included in breach checks) and the limit_type = 'net'
+      filter (causing gross and VaR limits to be mixed into net breach calculations).
+      Both produce incorrect results silently. The corrected join condition matches exactly
+      what the breach_report_by_date query template uses.
+    source: user
+    status: approved
+    author: "bob@riskco.com"
+    timestamp: "2026-03-22T11:02:00Z"
+
+  - correction_id: "corr_003"
+    target_type: column
+    target_id: "traders.employee_id"
+    correction_type: suppress
+    new_value: true
+    reason: >
+      employee_id is a PII field linking to HR and payroll records. It must not be exposed
+      to LLM agents under any circumstances. Suppressed permanently. If a query requires
+      mapping between trader_id and HR records, that must go through a separate approved
+      data access process, not through the semantic layer.
+    source: user
+    status: approved
+    author: "compliance@riskco.com"
+    timestamp: "2026-03-20T16:45:00Z"
+
+  - correction_id: "corr_004"
+    target_type: concept
+    target_id: "limit_breach"
+    correction_type: confidence_override
+    new_value: 1.0
+    reason: >
+      The limit_breach concept was human-authored in strata.md and hand-verified against
+      the production breach alerting system. The inferred confidence of 0.61 understates
+      the actual reliability — this definition has been used in production reports for 18 months
+      without correction.
+    source: user
+    status: approved
+    author: "alice@riskco.com"
+    timestamp: "2026-03-21T09:20:00Z"
+
+  - correction_id: "corr_005"
+    target_type: metric
+    target_id: "gross_notional"
+    correction_type: required_filter_add
+    new_value: "positions.quantity != 0"
+    reason: >
+      Agent observed that positions with quantity = 0 but non-null notional_usd exist in
+      the table (a known data quality issue from a prior migration). These inflate gross
+      notional figures. Suggested adding quantity != 0 as a required filter to match
+      the behaviour of the risk team's manual reports.
+    source: llm_suggested
+    status: pending
+    session_id: "session_f3a91c2b"
+    author: "strata-agent"
+    timestamp: "2026-03-23T10:45:00Z"

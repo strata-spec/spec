@@ -98,7 +98,7 @@ The strategic intent of this specification is that SMIF becomes the interchange 
 
 **A field belongs in SMIF if and only if its presence or value changes what SQL an agent generates, or changes whether an agent should generate SQL at all.**
 
-Fields that exist only for human readability, governance dashboards, or audit logging do not belong in the core schema. They may appear in the `properties` escape hatch (see Section 5.2) but are not part of the spec.
+Fields that exist only for human readability, governance dashboards, or audit logging do not belong in the core schema. They may appear in the `x_properties` escape hatch (see Section 5.2) but are not part of the spec.
 
 This test is applied to every proposed field addition. It is the primary mechanism for keeping the format small.
 
@@ -122,7 +122,7 @@ When the physical schema underlying a model changes (detected via `ddl_fingerpri
 
 ### 2.6 Extensibility without breaking changes
 
-The `properties` field on any object type provides an escape hatch for tool-specific or domain-specific metadata. Additions to this field never constitute a breaking change. Additions to the core schema increment the minor version. Removals or type changes to existing core fields increment the major version.
+The `x_properties` field on any object type provides an escape hatch for tool-specific or domain-specific metadata. Additions to this field never constitute a breaking change. Additions to the core schema increment the minor version. Removals or type changes to existing core fields increment the major version.
 
 ---
 
@@ -252,6 +252,8 @@ query_templates: [ ... ]
 | `source.type` | string | Yes | Database type. `postgres` is the only defined value in v0.1. |
 | `source.host_fingerprint` | string | Yes | Non-reversible fingerprint of the connection target. Used to detect when `semantic.yaml` is being served against a different database than the one it was generated from. MUST NOT contain the DSN, password, or hostname in plaintext. |
 | `source.schema_names` | list of strings | Yes | The Postgres schema names that were introspected. |
+
+> **One document, one database.** A SMIF document describes a single database source. Multi-source documents — federating across multiple databases or connection strings — are not supported in v0.1 and are out of scope for the format at this time.
 | `domain` | object | Yes | See Section 5.1. |
 | `models` | list of objects | Yes | See Section 5.2. Must contain at least one entry. |
 | `relationships` | list of objects | No | See Section 5.4. |
@@ -286,6 +288,11 @@ SMIF objects are divided into two conformance tiers.
 | `query_templates` | No |
 
 The two-tier distinction also provides a migration path: tools implement core first, extensions when ready. A v0.1-core-only implementation is fully conformant.
+
+> **On intentionally optional fields.** Several fields within core objects are optional by design — their absence is meaningful, not a gap. The following are the most commonly questioned:
+> - `temporal_model` on `domain` — absent when the database has no meaningful time dimension or when time conventions are too inconsistent to characterise globally.
+> - `semantic_role` on `relationships` — absent when the join path is self-evident (e.g. a single FK between two tables). Required in practice when multiple relationships exist between the same model pair.
+> - `maps_to_models` and `maps_to_columns` on `concepts` — absent when a concept has been defined but not yet mapped to its physical columns. This is valid: a concept can be named and described before its SQL definition is complete.
 
 ---
 
@@ -367,7 +374,7 @@ models:
       source_type: schema_constraint
       confidence: 1.0
       human_reviewed: false
-    properties: {}
+    x_properties: {}
 ```
 
 | Field | Type | Required | Description |
@@ -379,13 +386,13 @@ models:
 | `physical_source` | object | Yes | Identifies the physical object in the database. |
 | `physical_source.schema` | string | Yes | Postgres schema name (e.g. `public`, `risk`). |
 | `physical_source.table` | string | Yes | Table or view name. |
-| `physical_source.sql` | string | No | If the model is defined by a SQL expression rather than a table, this field contains that expression. `physical_source.table` should not be set if `sql` is set. |
+| `physical_source.sql` | string | No | Full SELECT statement defining this model, used when the model is not backed by a single physical table. This is a view-definition expression — the complete query that produces the model's rows — not a filter predicate applied to a table. If `sql` is set, `physical_source.table` MUST NOT be set. |
 | `primary_key` | string or list of strings | No | Column name or names constituting the primary key. Derived from schema constraints where available. Used for relationship resolution. |
 | `ddl_fingerprint` | string | Yes | SHA-256 hash of the normalised DDL for this table at the time of generation. Used to detect schema drift. See Section 7.3. |
 | `row_count_estimate` | integer | No | Approximate row count at time of generation. Used by agents for query planning heuristics (e.g., whether to suggest LIMIT clauses). Not a live value. |
 | `columns` | list of objects | Yes | Must contain at least one entry. See Section 5.3. |
 | `provenance` | object | Yes | See Section 6. |
-| `properties` | object | No | Escape hatch for tool-specific or domain-specific metadata. Any key-value pairs. Not part of the core spec. |
+| `x_properties` | object | No | Escape hatch for tool-specific or domain-specific metadata. Any key-value pairs. Not part of the core spec. |
 
 ---
 
@@ -448,7 +455,7 @@ columns:
 | `label` | string | Yes | Human-readable display name. |
 | `description` | string | Yes | Full description of what this column contains. Must include: what the value means, units where applicable, any filters required for correct interpretation, and common misinterpretations. This is the primary field used by agents for schema linking. |
 | `nullable` | boolean | Yes | Whether the column allows NULL values. Used by agents when deciding whether to include COALESCE or IS NULL conditions. |
-| `cardinality_category` | enum | Yes | Approximate cardinality. Valid values: `low` (< 100 distinct values), `medium` (100–10,000), `high` (> 10,000). Derived from sampling. |
+| `cardinality_category` | enum | Yes | Approximate cardinality. Valid values: `low` (fewer than 20 distinct values), `medium` (20–10,000), `high` (more than 10,000). Derived from sampling. These thresholds are normative — implementations must use them consistently for interoperability. |
 | `example_values` | list of strings | No | 3–10 representative values as strings, sanitised of PII. For `identifier` role columns, this SHOULD be empty. For `dimension` role columns with `low` cardinality, this SHOULD be populated. |
 | `usage_profile` | object | No | Statistics derived from query log mining. See Usage Profile below. |
 | `difficulty` | enum | No | Annotation difficulty classification. Valid values: `self_evident`, `context_dependent`, `ambiguous`, `domain_dependent`. See Difficulty Taxonomy below. |
@@ -485,7 +492,7 @@ The `usage_profile` object is populated from query log mining (e.g. `pg_stat_sta
 | `join_frequency` | float | Fraction of sampled queries joining on this column. |
 | `common_clauses` | list of strings | 1–5 representative normalised clause fragments (with literals replaced by `?`). Derived from query annotation or pattern mining. |
 
-If `usage_profile` is absent, agents MUST treat it as equivalent to all-zero frequencies.
+If `usage_profile` is absent, agents and consumers MUST NOT treat it as equivalent to all-zero frequencies. Absence means usage data was unavailable (e.g. `pg_stat_statements` was not enabled or was not opted into). Zero frequencies mean the column was observed in query logs and simply not used in that clause type. These are meaningfully different states.
 
 ---
 
@@ -540,7 +547,7 @@ relationships:
 | `join_condition` | string | Yes | Full SQL join condition, fully qualified with model names. May be multi-clause (e.g. date-scoped joins). |
 | `semantic_role` | string | No | Plain-language description of what this relationship represents and when to use it. Agents use this to choose between multiple possible join paths to the same target model. |
 | `always_valid` | boolean | Yes | If `true`, this join is safe to apply in any query that references both models. If `false`, the join has conditions or caveats described in `semantic_role` that the agent must evaluate. |
-| `preferred` | boolean | Yes | If `true` and multiple relationships exist between the same pair of models, this is the default join path. Exactly one relationship between any model pair should be `preferred: true`. |
+| `preferred` | boolean | No | When absent, consumers MUST treat as `false`. When `true` and multiple relationships exist between the same model pair, this is the default join path. At most one relationship per model pair should be `preferred: true` — enforced by V-021. |
 | `provenance` | object | Yes | See Section 6. |
 
 ---
@@ -592,7 +599,7 @@ metrics:
 | `name` | string | Yes | Programmatic name. |
 | `label` | string | Yes | Human-readable display name. |
 | `description` | string | Yes | Full description including units, required context, and any caveats. |
-| `expression` | string | Yes | SQL expression defining the metric. Uses fully qualified `model_name.column_name` references. |
+| `expression` | string | Yes | SQL expression defining the metric, using fully qualified `model_name.column_name` references. In v0.1 all expressions are evaluated as PostgreSQL SQL fragments in the context of the source database. No `expression_language` field is needed — this will be revisited at v0.2 when multi-backend support is considered. |
 | `aggregation` | enum | Yes | Top-level aggregation function. Valid values: `sum`, `count`, `count_distinct`, `avg`, `min`, `max`, `ratio`, `custom`. |
 | `status` | enum | **Runtime only — MUST NOT appear in `semantic.yaml`** | Operational status computed by the serving layer at startup based on correction cascades. Valid values: `active`, `degraded`, `suppressed`. See metric status values below and validation rule V-035. |
 | `degraded_reason` | string | **Runtime only — MUST NOT appear in `semantic.yaml`** | Populated by the serving layer when `status: degraded`. Plain-language explanation of which suppressed dependency caused degradation. See validation rule V-036. |
@@ -775,7 +782,7 @@ The trust hierarchy is ordered from highest to lowest trust. When a field's valu
 
 When the same field receives input from multiple sources (e.g. both a `ddl_comment` and an `llm_inferred` description exist for the same column), the value from the higher-trust source takes precedence. The `provenance` block records the source of the value that was actually used; superseded values are not stored in the core document.
 
-If a tool wishes to retain superseded values for debugging, they MAY be placed in the `properties` escape hatch with a key like `_superseded_provenance`.
+If a tool wishes to retain superseded values for debugging, they MAY be placed in the `x_properties` field with a key like `x_superseded_provenance`.
 
 ---
 
@@ -1025,7 +1032,7 @@ To add a new example: fork the repository, add a directory under `examples/`, in
 
 ## 10. Explicit Non-Goals
 
-The following capabilities are out of scope for SMIF. They will not be added to the core schema. Tools that need them are welcome to use the `properties` escape hatch.
+The following capabilities are out of scope for SMIF. They will not be added to the core schema. Tools that need them are welcome to use the `x_properties` escape hatch.
 
 **Formal ontology reasoning and inheritance chains.** SMIF has a `broader` field on concepts for simple parent-child classification. It does not support OWL-style reasoning, transitivity, or class hierarchies. If you need FIBO alignment or full ontology traversal, use an ontology tool and import the relevant definitions into SMIF concepts via `catalog_import` provenance.
 
@@ -1035,7 +1042,7 @@ The following capabilities are out of scope for SMIF. They will not be added to 
 
 **Query optimisation and execution planning.** SMIF is not a query planner. It does not contain index metadata, partition information, or cost statistics. Tools MAY use `row_count_estimate` as a rough planning heuristic, but the format makes no guarantees about query performance.
 
-**Access control enforcement.** SMIF does not define or enforce column-level security, row-level security, or attribute-based access control. Downstream tools are responsible for these. SMIF may record that a column is sensitive (via `difficulty: domain_dependent` or a `properties` flag) to inform agent behaviour, but it does not enforce access.
+**Access control enforcement.** SMIF does not define or enforce column-level security, row-level security, or attribute-based access control. Downstream tools are responsible for these. SMIF may record that a column is sensitive (via `difficulty: domain_dependent` or an `x_properties` flag) to inform agent behaviour, but it does not enforce access.
 
 **BI dashboard semantics.** SMIF does not model drill-through hierarchies, pivot configurations, chart types, or dashboard layouts. It is a semantic layer for agents generating SQL, not a BI metadata layer.
 

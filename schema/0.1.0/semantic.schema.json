@@ -1,0 +1,312 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://strata-spec.github.io/spec/schema/0.1.0/semantic.schema.json",
+  "title": "SMIF Semantic Model",
+  "description": "JSON Schema for Semantic Model Interchange Format (SMIF) semantic.yaml documents. Spec version 0.1.0.",
+  "$comment": "TODO: This skeleton captures the document envelope and top-level structure. Full field-level validation will be completed at v0.1.0 ratification. The normative validation rules are defined in Appendix C of SPEC.md — this schema enforces the structural subset of those rules that can be expressed in JSON Schema.",
+  "type": "object",
+  "required": ["smif_version", "generated_at", "tool_version", "source", "domain", "models"],
+  "additionalProperties": false,
+  "properties": {
+    "smif_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[a-zA-Z0-9.]+)?$",
+      "description": "SMIF spec version this document conforms to."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp of document generation."
+    },
+    "tool_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifying string for the tool and version that generated this document."
+    },
+    "source": {
+      "type": "object",
+      "required": ["type", "host_fingerprint", "schema_names"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["postgres"],
+          "description": "Database type. Only 'postgres' is defined in v0.1."
+        },
+        "host_fingerprint": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Non-reversible fingerprint of the connection target."
+        },
+        "schema_names": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "Postgres schema names that were introspected."
+        }
+      }
+    },
+    "domain": {
+      "$ref": "#/$defs/domain"
+    },
+    "models": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/model" },
+      "minItems": 1,
+      "description": "List of models. At least one required."
+    },
+    "relationships": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/relationship" },
+      "default": []
+    },
+    "concepts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/concept" },
+      "default": []
+    },
+    "metrics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/metric" },
+      "default": []
+    },
+    "query_templates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/query_template" },
+      "default": []
+    }
+  },
+  "$defs": {
+    "provenance": {
+      "type": "object",
+      "required": ["source_type", "confidence", "human_reviewed"],
+      "properties": {
+        "source_type": {
+          "type": "string",
+          "enum": [
+            "user_defined",
+            "ddl_comment",
+            "schema_constraint",
+            "catalog_import",
+            "code_extracted",
+            "log_inferred",
+            "llm_inferred"
+          ]
+        },
+        "source_ref": { "type": "string" },
+        "agent": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "human_reviewed": { "type": "boolean" }
+      }
+    },
+    "domain": {
+      "type": "object",
+      "required": ["name", "description", "provenance"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "key_concepts": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "temporal_model": {
+          "type": "object",
+          "properties": {
+            "business_date_column": { "type": "string" },
+            "timezone": { "type": "string" },
+            "note": { "type": "string" }
+          }
+        },
+        "known_gotchas": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "column": {
+      "type": "object",
+      "required": ["name", "data_type", "role", "label", "description", "nullable", "cardinality_category", "provenance"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "data_type": { "type": "string", "minLength": 1 },
+        "role": {
+          "type": "string",
+          "enum": ["identifier", "dimension", "measure", "timestamp", "flag"]
+        },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "nullable": { "type": "boolean" },
+        "cardinality_category": {
+          "type": "string",
+          "enum": ["low", "medium", "high"]
+        },
+        "example_values": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "usage_profile": {
+          "type": "object",
+          "properties": {
+            "select_frequency": { "type": "number", "minimum": 0, "maximum": 1 },
+            "where_frequency": { "type": "number", "minimum": 0, "maximum": 1 },
+            "group_by_frequency": { "type": "number", "minimum": 0, "maximum": 1 },
+            "join_frequency": { "type": "number", "minimum": 0, "maximum": 1 },
+            "common_clauses": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "difficulty": {
+          "type": "string",
+          "enum": ["self_evident", "context_dependent", "ambiguous", "domain_dependent"]
+        },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["model_id", "name", "label", "description", "physical_source", "ddl_fingerprint", "columns", "provenance"],
+      "properties": {
+        "model_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "name": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "physical_source": {
+          "type": "object",
+          "required": ["schema", "table"],
+          "properties": {
+            "schema": { "type": "string", "minLength": 1 },
+            "table": { "type": "string", "minLength": 1 },
+            "sql": { "type": "string" }
+          }
+        },
+        "primary_key": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "ddl_fingerprint": { "type": "string", "minLength": 1 },
+        "row_count_estimate": { "type": "integer", "minimum": 0 },
+        "columns": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/column" },
+          "minItems": 1
+        },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "properties": { "type": "object" }
+      }
+    },
+    "relationship": {
+      "type": "object",
+      "required": ["relationship_id", "from_model", "from_column", "to_model", "to_column", "relationship_type", "join_condition", "always_valid", "preferred", "provenance"],
+      "properties": {
+        "relationship_id": { "type": "string", "minLength": 1 },
+        "from_model": { "type": "string", "minLength": 1 },
+        "from_column": { "type": "string", "minLength": 1 },
+        "to_model": { "type": "string", "minLength": 1 },
+        "to_column": { "type": "string", "minLength": 1 },
+        "relationship_type": {
+          "type": "string",
+          "enum": ["one_to_one", "one_to_many", "many_to_one", "many_to_many"]
+        },
+        "join_condition": { "type": "string", "minLength": 1 },
+        "semantic_role": { "type": "string" },
+        "always_valid": { "type": "boolean" },
+        "preferred": { "type": "boolean" },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "model_column_ref": {
+      "type": "object",
+      "required": ["model", "column"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "column": { "type": "string", "minLength": 1 }
+      }
+    },
+    "concept": {
+      "type": "object",
+      "required": ["concept_id", "label", "description", "provenance"],
+      "properties": {
+        "concept_id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "definition_sql": { "type": "string" },
+        "broader": { "type": ["string", "null"] },
+        "maps_to_models": { "type": "array", "items": { "type": "string" } },
+        "maps_to_columns": { "type": "array", "items": { "$ref": "#/$defs/model_column_ref" } },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "required": ["metric_id", "name", "label", "description", "expression", "aggregation", "provenance"],
+      "$comment": "Fields 'status' and 'degraded_reason' are runtime-computed and MUST NOT appear in semantic.yaml. See validation rules V-031 and V-032.",
+      "not": {
+        "anyOf": [
+          { "required": ["status"] },
+          { "required": ["degraded_reason"] }
+        ]
+      },
+      "properties": {
+        "metric_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "expression": { "type": "string", "minLength": 1 },
+        "aggregation": {
+          "type": "string",
+          "enum": ["sum", "count", "count_distinct", "avg", "min", "max", "ratio", "custom"]
+        },
+        "default_time_dimension": { "$ref": "#/$defs/model_column_ref" },
+        "valid_dimensions": { "type": "array", "items": { "$ref": "#/$defs/model_column_ref" } },
+        "invalid_dimensions": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/model_column_ref" },
+              {
+                "properties": {
+                  "reason": { "type": "string", "minLength": 1 }
+                },
+                "required": ["reason"]
+              }
+            ]
+          }
+        },
+        "required_filters": { "type": "array", "items": { "type": "string" } },
+        "additivity": {
+          "type": "string",
+          "enum": ["fully_additive", "semi_additive", "non_additive"]
+        },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "query_template": {
+      "type": "object",
+      "required": ["template_id", "description", "sql_template", "provenance"],
+      "properties": {
+        "template_id": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "sql_template": { "type": "string", "minLength": 1 },
+        "parameters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "data_type", "description"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "data_type": { "type": "string", "minLength": 1 },
+              "description": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    }
+  }
+}

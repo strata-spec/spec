@@ -66,6 +66,17 @@ A complete example for a financial risk management database is in [`examples/fin
 
 ---
 
+## Reference implementation
+
+[Strata](https://github.com/strata-spec/openstrata) — zero-config Go CLI.
+Connects to a PostgreSQL database, infers a SMIF semantic model automatically,
+and serves it via MCP.
+```bash
+go install github.com/strata-spec/openstrata@latest
+```
+
+---
+
 ## Read the spec
 
 The full specification is in [`SPEC.md`](SPEC.md). It covers:

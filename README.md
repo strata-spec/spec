@@ -86,7 +86,19 @@ The full specification is in [`SPEC.md`](SPEC.md). It covers:
 - Provenance model and trust hierarchy
 - Confidence scoring and schema drift detection
 - Corrections overlay with full precedence rules
-- 52 normative validation rules (42 MUST, 10 SHOULD) in Appendix C
+- Normative validation rules in Appendix C
+
+---
+
+## Required Filters Migration Pattern
+
+Use object entries for `required_filters` on both models and metrics:
+
+- New canonical shape:
+  - `expression`: SQL WHERE-clause condition fragment
+  - `reason`: plain-language explanation of why omission causes incorrect results
+
+Legacy string-only `required_filters` entries should be migrated to object entries so each filter carries explicit machine-usable logic and human-readable rationale. This guidance is intentionally version-agnostic and applies whenever required filters are present.
 
 ---
 

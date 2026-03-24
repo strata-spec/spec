@@ -68,6 +68,9 @@ models:
     primary_key: "position_id"
     ddl_fingerprint: "sha256:7c4e9f1a2b3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9"
     row_count_estimate: 4200000
+    required_filters:
+      - expression: "positions.deleted_at IS NULL"
+        reason: "positions uses soft-delete semantics. Omitting this includes superseded rows and returns incorrect current-state results."
     columns:
 
       - name: "position_id"
@@ -171,6 +174,23 @@ models:
         provenance:
           source_type: schema_constraint
           confidence: 0.95
+          human_reviewed: false
+
+      - name: "direction"
+        data_type: "text"
+        role: dimension
+        label: "Direction"
+        description: "Position direction. long indicates positive exposure and short indicates negative exposure. Use this column for long-vs-short breakdowns."
+        nullable: false
+        cardinality_category: low
+        example_values: ["long", "short"]
+        valid_values: ["long", "short"]
+        case_sensitive: true
+        difficulty: self_evident
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.82
           human_reviewed: false
 
       - name: "net_exposure_usd"
@@ -376,6 +396,8 @@ models:
         nullable: false
         cardinality_category: low
         example_values: ["Equity", "Fixed Income", "Derivative", "FX", "Commodity"]
+        valid_values: ["Equity", "Fixed Income", "Derivative", "FX", "Commodity"]
+        case_sensitive: true
         difficulty: context_dependent
         usage_profile:
           select_frequency: 0.44
@@ -500,7 +522,9 @@ models:
         description: "Geographic region the desk operates in. Used for regional aggregation of exposure."
         nullable: false
         cardinality_category: low
-        example_values: ["EMEA", "Americas", "APAC"]
+        example_values: ["EMEA", "AMER", "APAC"]
+        valid_values: ["EMEA", "AMER", "APAC"]
+        case_sensitive: true
         difficulty: self_evident
         provenance:
           source_type: llm_inferred
@@ -626,6 +650,9 @@ models:
     primary_key: "desk_limit_id"
     ddl_fingerprint: "sha256:4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5"
     row_count_estimate: 14400
+    required_filters:
+      - expression: "desk_limits.deleted_at IS NULL"
+        reason: "desk_limits is soft-deleted. Omitting this can apply superseded limits and produce incorrect breach calculations."
     columns:
 
       - name: "desk_limit_id"
@@ -709,7 +736,9 @@ models:
         description: "Classification of this limit. 'gross' measures the sum of absolute exposures. 'net' measures the sum of signed exposures after netting. The breach calculation differs by type — check limit_type before comparing against net_exposure_usd."
         nullable: false
         cardinality_category: low
-        example_values: ["gross", "net"]
+        example_values: ["gross", "net", "var"]
+        valid_values: ["gross", "net", "var"]
+        case_sensitive: true
         difficulty: domain_dependent
         provenance:
           source_type: llm_inferred
@@ -986,7 +1015,8 @@ metrics:
         column: "trader_id"
         reason: "Trader-level breakdown reveals individual P&L to other desks. Only permitted when trader_id filter is explicitly scoped to the requesting user's own desk."
     required_filters:
-      - "positions.deleted_at IS NULL"
+      - expression: "positions.deleted_at IS NULL"
+        reason: "positions is soft-deleted. Omitting this includes superseded rows and overstates current exposure."
     additivity: fully_additive
     provenance:
       source_type: log_inferred
@@ -1025,7 +1055,8 @@ metrics:
         column: "position_id"
         reason: "Surrogate key. Produces one row per position, not a meaningful aggregate."
     required_filters:
-      - "positions.deleted_at IS NULL"
+      - expression: "positions.deleted_at IS NULL"
+        reason: "positions is soft-deleted. Omitting this includes superseded rows and distorts P&L aggregates."
     additivity: fully_additive
     provenance:
       source_type: log_inferred
@@ -1059,8 +1090,10 @@ metrics:
         column: "asset_class"
         reason: "Asset class grouping would produce partial-desk ratios that cannot be compared against desk-level limits."
     required_filters:
-      - "positions.deleted_at IS NULL"
-      - "desk_limits.deleted_at IS NULL"
+      - expression: "positions.deleted_at IS NULL"
+        reason: "positions is soft-deleted. Omitting this includes superseded rows in the utilisation numerator."
+      - expression: "desk_limits.deleted_at IS NULL"
+        reason: "desk_limits is soft-deleted. Omitting this can match inactive limits and produce incorrect utilisation."
     additivity: non_additive
     provenance:
       source_type: log_inferred

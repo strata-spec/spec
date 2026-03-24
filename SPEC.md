@@ -1,6 +1,6 @@
 # Semantic Model Interchange Format (SMIF)
 
-**Specification Version:** 0.1.0-draft  
+**Specification Version:** 0.1.1-draft  
 **Status:** Draft — not yet ratified  
 **License:** Apache License 2.0  
 **Repository:** https://github.com/strata-spec/spec  
@@ -390,9 +390,12 @@ models:
 | `primary_key` | string or list of strings | No | Column name or names constituting the primary key. Derived from schema constraints where available. Used for relationship resolution. |
 | `ddl_fingerprint` | string | Yes | SHA-256 hash of the normalised DDL for this table at the time of generation. Used to detect schema drift. See Section 7.3. |
 | `row_count_estimate` | integer | No | Approximate row count at time of generation. Used by agents for query planning heuristics (e.g., whether to suggest LIMIT clauses). Not a live value. |
+| `required_filters` | list of objects | No | Mandatory SQL filter conditions that MUST be included in every query against this model. Each entry contains `expression` and `reason`. |
 | `columns` | list of objects | Yes | Must contain at least one entry. See Section 5.3. |
 | `provenance` | object | Yes | See Section 6. |
 | `x_properties` | object | No | Escape hatch for tool-specific or domain-specific metadata. Any key-value pairs. Not part of the core spec. |
+
+When present, agents MUST include all `required_filters` expressions in the WHERE clause of any query against this model. Filters are AND-combined with any user-supplied conditions.
 
 ---
 
@@ -457,9 +460,13 @@ columns:
 | `nullable` | boolean | Yes | Whether the column allows NULL values. Used by agents when deciding whether to include COALESCE or IS NULL conditions. |
 | `cardinality_category` | enum | Yes | Approximate cardinality. Valid values: `low` (fewer than 20 distinct values), `medium` (20–10,000), `high` (more than 10,000). Derived from sampling. These thresholds are normative — implementations must use them consistently for interoperability. |
 | `example_values` | list of strings | No | 3–10 representative values as strings, sanitised of PII. For `identifier` role columns, this SHOULD be empty. For `dimension` role columns with `low` cardinality, this SHOULD be populated. |
+| `valid_values` | list of strings | No | Exhaustive list of valid string values for this column. When present, agents MUST use only these values in filter conditions. |
+| `case_sensitive` | boolean | No | Whether comparisons against `valid_values` are case-sensitive. Defaults to `true` when absent. Only meaningful when `valid_values` is present. |
 | `usage_profile` | object | No | Statistics derived from query log mining. See Usage Profile below. |
 | `difficulty` | enum | No | Annotation difficulty classification. Valid values: `self_evident`, `context_dependent`, `ambiguous`, `domain_dependent`. See Difficulty Taxonomy below. |
 | `provenance` | object | Yes | See Section 6. |
+
+`valid_values` and `example_values` are semantically distinct. `valid_values` is exhaustive and authoritative; `example_values` is a sample. When both are present, agents use `valid_values` for filter generation and `example_values` for display only.
 
 #### Role Definitions
 
@@ -584,7 +591,8 @@ metrics:
         column: "position_id"
         reason: "Surrogate key. Grouping by this produces one row per position, not a meaningful aggregate."
     required_filters:
-      - "positions.deleted_at IS NULL"
+      - expression: "positions.deleted_at IS NULL"
+        reason: "positions is soft-deleted. Omitting this includes superseded rows and overstates exposure."
     additivity: fully_additive
     provenance:
       source_type: log_inferred
@@ -606,7 +614,7 @@ metrics:
 | `default_time_dimension` | object | No | The model and column that should be used for time-series analysis of this metric by default. |
 | `valid_dimensions` | list of objects | No | Model–column pairs that are semantically valid GROUP BY dimensions for this metric. Each entry has `model` and `column`. |
 | `invalid_dimensions` | list of objects | No | Model–column pairs that are semantically invalid for this metric, with a `reason` string. Agents MUST NOT group by invalid dimensions unless the user explicitly overrides. |
-| `required_filters` | list of strings | No | SQL filter conditions that MUST be present in any query using this metric. These protect against common errors (e.g., double-counting deleted rows). |
+| `required_filters` | list of objects | No | SQL filter conditions that MUST be present in any query using this metric. Each entry has required fields `expression` (SQL condition) and `reason` (why omission causes wrong results). |
 | `additivity` | enum | No | Indicates whether the metric can be safely summed across all dimensions. Valid values: `fully_additive` (safe to SUM across any dimension), `semi_additive` (safe to SUM across some dimensions, e.g. balance accounts), `non_additive` (ratios, percentages — cannot be summed). |
 | `provenance` | object | Yes | See Section 6. |
 
@@ -1087,7 +1095,7 @@ Validators implementing the `validate` command SHOULD use the JSON Schema for st
 
 | Version | Date | Summary |
 |---|---|---|
-| 0.1.1-draft | 2026-03 | Added `strata_md` `source_type` value. Confidence default: 0.95. |
+| 0.1.1-draft | 2026-03 | Added model-level `required_filters`; upgraded metric `required_filters` to `{expression, reason}` objects; added column `valid_values` and `case_sensitive`; added V-043 and W-011. |
 | 0.1.0-draft | 2026-03 | Initial draft. Full schema for domain, models, columns, relationships, concepts, metrics, query_templates. Three-file system. Provenance model. Confidence scoring. Corrections overlay. |
 | 0.1.0-draft.2 | 2026-03 | **Breaking changes from draft.1:** (1) Two-tier object model introduced — concepts and query_templates demoted to extended tier; (2) `metrics[].status` added (`active` \| `degraded` \| `suppressed`) — runtime-computed, MUST NOT appear in `semantic.yaml`; (3) `metrics[].degraded_reason` added — runtime-computed, MUST NOT appear in `semantic.yaml`; (4) `corrections[].status` added (`approved` \| `pending` \| `rejected` \| `auto_applied`) — required field; (5) `corrections[].session_id` added — optional, for `llm_suggested` traceability; (6) `corrections[].source` enum rationalised: `admin_defined` removed, `system` added; valid values are now `user_defined`, `system`, `llm_suggested`; (7) `smif_corrections_version` removed — corrections version is now tied to `smif_version`; (8) Suppression cascade rules formalised in Section 8.3.1; (9) Correction provenance contract added as Section 8.5. |
 
@@ -2080,6 +2088,25 @@ corrections:
 
 ---
 
+#### V-043 — `required_filters` entries have non-empty `expression` and `reason`
+**Scope:** document  
+**Description:** Any `required_filters` entry (on models or metrics) MUST be an object containing non-empty `expression` and `reason` strings. Raw strings are invalid.
+
+**Passes:**
+```yaml
+required_filters:
+  - expression: "root_id = 1"
+    reason: "multi-root tree"
+```
+
+**Fails:**
+```yaml
+required_filters:
+  - "root_id = 1"   # raw string, not an object
+```
+
+---
+
 ### C.4 SHOULD rules — `W-` series
 
 ---
@@ -2321,6 +2348,28 @@ metrics:
 
 ---
 
+#### W-011 — Columns with `valid_values` should set `case_sensitive` explicitly
+**Scope:** document  
+**Description:** A column that declares `valid_values` SHOULD explicitly set `case_sensitive` rather than relying on the default. This makes casing semantics unambiguous for agents and validators.
+
+**Passes:**
+```yaml
+columns:
+  - name: "status"
+    valid_values: ["OPEN", "CLOSED"]
+    case_sensitive: true
+```
+
+**Warns:**
+```yaml
+columns:
+  - name: "status"
+    valid_values: ["OPEN", "CLOSED"]
+    # case_sensitive omitted — default applies, but intent is implicit
+```
+
+---
+
 ### C.5 Rule index
 
 | ID | Tier | Scope | Short description |
@@ -2367,6 +2416,7 @@ metrics:
 | V-040 | MUST | corrections | `corrections.correction_type` is a defined value |
 | V-041 | MUST | workspace | `smif_version` in `corrections.yaml` matches `semantic.yaml` |
 | V-042 | MUST | workspace | Correction `target_id` resolves to a defined object |
+| V-043 | MUST | document | `required_filters` entries have non-empty `expression` and `reason` |
 | W-001 | SHOULD | document | Model `description` is substantive |
 | W-002 | SHOULD | document | Non-identifier columns have substantive descriptions |
 | W-003 | SHOULD | document | Ambiguous/domain-dependent columns are human-reviewed |
@@ -2377,6 +2427,7 @@ metrics:
 | W-008 | SHOULD | document | Parameterised templates declare their parameters |
 | W-009 | SHOULD | workspace | Pending corrections surfaced for review |
 | W-010 | SHOULD | document | `default_time_dimension` references a non-timestamp column |
+| W-011 | SHOULD | document | Columns with `valid_values` explicitly set `case_sensitive` |
 ---
 
 *SMIF is an open specification. Contributions, issues, and proposals are welcome at https://github.com/strata-spec/spec. The specification is governed by the GOVERNANCE.md document in that repository.*

@@ -132,6 +132,15 @@
           "description": "low = fewer than 20 distinct values. medium = 20 to 10,000. high = more than 10,000."
         },
         "example_values": { "type": "array", "items": { "type": "string" } },
+        "valid_values": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Exhaustive list of valid values for this column. When present, agents must use only these values in filter conditions."
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "description": "Whether valid_values comparisons are case-sensitive. Defaults to true when absent. Only meaningful when valid_values is present."
+        },
         "difficulty": { "type": "string", "enum": ["self_evident","context_dependent","ambiguous","domain_dependent"] },
         "usage_profile": { "$ref": "#/$defs/usage_profile" },
         "provenance":    { "$ref": "#/$defs/provenance" },
@@ -170,6 +179,18 @@
         },
         "ddl_fingerprint":     { "type": "string", "minLength": 1 },
         "row_count_estimate":  { "type": "integer", "minimum": 0 },
+        "required_filters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["expression", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "expression": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
         "columns":     { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/column" } },
         "provenance":  { "$ref": "#/$defs/provenance" },
         "x_properties":{ "$ref": "#/$defs/x_properties" }
@@ -234,7 +255,18 @@
         "default_time_dimension": { "$ref": "#/$defs/model_column_ref" },
         "valid_dimensions":   { "type": "array", "items": { "$ref": "#/$defs/model_column_ref" } },
         "invalid_dimensions": { "type": "array", "items": { "$ref": "#/$defs/invalid_dimension_ref" } },
-        "required_filters":   { "type": "array", "items": { "type": "string" } },
+        "required_filters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["expression", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "expression": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
         "additivity": { "type": "string", "enum": ["fully_additive","semi_additive","non_additive"] },
         "provenance": { "$ref": "#/$defs/provenance" }
       },

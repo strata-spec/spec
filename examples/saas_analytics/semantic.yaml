@@ -1,0 +1,1229 @@
+smif_version: "0.1.0"
+generated_at: "2026-03-29T12:00:00Z"
+tool_version: "strata/0.1.0"
+source:
+  type: postgres
+  host_fingerprint: "sha256:b9c2d5f8e1a4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9e2f5a8b1c4d7e0f3a6b9c2"
+  schema_names:
+    - saas
+
+# ---------------------------------------------------------------------------
+# DOMAIN
+# ---------------------------------------------------------------------------
+
+domain:
+  name: "SaaS Product Analytics"
+  description: >
+    Product analytics database for a B2B SaaS application. Tracks user
+    behaviour, subscription lifecycle, and feature adoption. Primary consumers
+    are the growth team (acquisition and activation funnels), finance (MRR and
+    churn reporting), and product (feature engagement dashboards).
+  key_concepts:
+    - "Event: a single user interaction stored in a wide table discriminated by event_type"
+    - "Session: a contiguous window of user activity with a 30-minute inactivity timeout"
+    - "DAU: count of distinct users with at least one user_active event on a calendar day"
+    - "MRR: normalised monthly value of all active subscriptions at a point in time"
+    - "Churn: a paid user who cancelled, recorded by churned_at and subscription status"
+    - "Plan: a pricing tier governing features and price; users hold one plan at a time"
+  temporal_model:
+    business_date_column: "occurred_at"
+    timezone: "UTC"
+    note: >
+      All timestamps are TIMESTAMPTZ stored in UTC. Convert to local timezone
+      only when displaying to end-users. DAU and WAU calculations must use
+      DATE(occurred_at AT TIME ZONE 'UTC') to bucket events into calendar days.
+  known_gotchas:
+    - "events is a wide table — always filter event_type first. Mixing event types produces semantically incoherent result sets."
+    - "DAU must be computed from event_type = 'user_active'. Counting distinct user_id across all event types inflates DAU with system events."
+    - "MRR is semi-additive. Filter subscriptions.status = 'active' for current MRR. Summing across cancelled rows gives total contract value, not MRR."
+    - "users.plan_id is the current plan only. For plan history, query subscriptions."
+    - "sessions.ended_at IS NULL for in-progress sessions. Exclude when computing duration statistics."
+    - "subscriptions.ended_at IS NULL for active subscriptions. Filter on status = 'active', not ended_at IS NULL."
+  provenance:
+    source_type: llm_inferred
+    source_ref: "xiyan_pass_1"
+    confidence: 0.83
+    human_reviewed: false
+
+# ---------------------------------------------------------------------------
+# MODELS
+# ---------------------------------------------------------------------------
+
+models:
+
+  # ---- users ---------------------------------------------------------------
+
+  - model_id: "users"
+    name: "users"
+    label: "Users"
+    description: >
+      One row per registered user account. Contains current plan assignment,
+      signup date, and churn date. Users are never hard-deleted — churned users
+      remain in the table with churned_at set. email is PII and must not appear
+      in aggregated outputs.
+    physical_source:
+      schema: "saas"
+      table: "users"
+    primary_key: "user_id"
+    ddl_fingerprint: "sha256:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2"
+    row_count_estimate: 94000
+    columns:
+
+      - name: "user_id"
+        data_type: "bigint"
+        role: identifier
+        label: "User ID"
+        description: "Surrogate primary key. Used as the join key from events, sessions, and subscriptions. Do not expose in public-facing outputs."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "email"
+        data_type: "text"
+        role: dimension
+        label: "Email"
+        description: "User's email address. Personally identifiable information. Do not include in any aggregated output or export. Used only for user-scoped lookups with explicit user consent."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "plan_id"
+        data_type: "integer"
+        role: identifier
+        label: "Plan ID"
+        description: "Foreign key to saas.plans. Reflects the user's current plan. For historical plan assignments, query the subscriptions table. Do not use this column in historical MRR reports."
+        nullable: true
+        cardinality_category: low
+        example_values: []
+        difficulty: context_dependent
+        usage_profile:
+          select_frequency: 0.38
+          where_frequency: 0.41
+          group_by_frequency: 0.29
+          join_frequency: 0.72
+          common_clauses:
+            - "JOIN saas.plans p ON users.plan_id = p.plan_id"
+            - "WHERE users.plan_id = ?"
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "country"
+        data_type: "char(2)"
+        role: dimension
+        label: "Country"
+        description: "ISO 3166-1 alpha-2 country code from the user's signup IP address. Two-character code (e.g. 'US', 'GB', 'DE'). Nullable for users who signed up before geolocation was added."
+        nullable: true
+        cardinality_category: low
+        example_values: ["US", "GB", "DE", "FR", "CA", "AU"]
+        difficulty: self_evident
+        usage_profile:
+          select_frequency: 0.29
+          where_frequency: 0.33
+          group_by_frequency: 0.51
+          join_frequency: 0.0
+          common_clauses:
+            - "GROUP BY users.country"
+            - "WHERE users.country = ?"
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.81
+          human_reviewed: false
+
+      - name: "created_at"
+        data_type: "timestamptz"
+        role: timestamp
+        label: "Signed Up At"
+        description: "UTC timestamp when the user account was created. Use this column for cohort analysis, signup trend reporting, and time-since-signup calculations."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        usage_profile:
+          select_frequency: 0.44
+          where_frequency: 0.52
+          group_by_frequency: 0.38
+          join_frequency: 0.0
+          common_clauses:
+            - "WHERE users.created_at >= ?"
+            - "DATE_TRUNC('month', users.created_at)"
+            - "DATE_TRUNC('week', users.created_at)"
+        provenance:
+          source_type: schema_constraint
+          confidence: 0.97
+          human_reviewed: false
+
+      - name: "trial_ends_at"
+        data_type: "timestamptz"
+        role: timestamp
+        label: "Trial Ends At"
+        description: "UTC timestamp when the user's free trial expires. NULL for users who signed up directly to a paid plan or whose trial has already converted."
+        nullable: true
+        cardinality_category: high
+        example_values: []
+        difficulty: context_dependent
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.76
+          human_reviewed: false
+
+      - name: "churned_at"
+        data_type: "timestamptz"
+        role: timestamp
+        label: "Churned At"
+        description: "UTC timestamp when the user cancelled their paid subscription. NULL for active and free-tier users. Use this column for churn date filtering and time-to-churn calculations."
+        nullable: true
+        cardinality_category: high
+        example_values: []
+        difficulty: context_dependent
+        usage_profile:
+          select_frequency: 0.31
+          where_frequency: 0.43
+          group_by_frequency: 0.12
+          join_frequency: 0.0
+          common_clauses:
+            - "WHERE users.churned_at IS NOT NULL"
+            - "WHERE users.churned_at IS NULL"
+            - "WHERE users.churned_at >= ?"
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.79
+          human_reviewed: false
+
+      - name: "is_active"
+        data_type: "boolean"
+        role: flag
+        label: "Is Active"
+        description: "Whether the user account is currently active (not suspended or deactivated by an administrator). This is distinct from churn — a churned user may still be is_active if on a free plan. Use churned_at for churn analysis."
+        nullable: false
+        cardinality_category: low
+        example_values: ["true", "false"]
+        difficulty: context_dependent
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.74
+          human_reviewed: false
+
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  # ---- events --------------------------------------------------------------
+
+  - model_id: "events"
+    name: "events"
+    label: "Product Events"
+    description: >
+      Wide event table. One row per user interaction. All event types share this
+      table, discriminated by event_type. Columns such as feature_name and
+      page_name are only populated for specific event types and are NULL
+      otherwise. Always filter event_type before querying this table — mixing
+      event types produces semantically incoherent result sets. This is the
+      highest-volume table in the schema.
+    physical_source:
+      schema: "saas"
+      table: "events"
+    primary_key: "event_id"
+    ddl_fingerprint: "sha256:2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3"
+    row_count_estimate: 840000000
+    required_filters:
+      - expression: "events.event_type IS NOT NULL"
+        reason: "A NULL event_type indicates a data ingestion error. These rows have no semantic meaning and must be excluded from all queries."
+    columns:
+
+      - name: "event_id"
+        data_type: "bigint"
+        role: identifier
+        label: "Event ID"
+        description: "Surrogate primary key. Monotonically increasing within each partition. Has no business meaning. Do not filter, display, or group by this column."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "user_id"
+        data_type: "bigint"
+        role: identifier
+        label: "User ID"
+        description: "Foreign key to saas.users. Identifies the user who generated this event."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        usage_profile:
+          select_frequency: 0.21
+          where_frequency: 0.47
+          group_by_frequency: 0.44
+          join_frequency: 0.38
+          common_clauses:
+            - "COUNT(DISTINCT events.user_id)"
+            - "WHERE events.user_id = ?"
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "session_id"
+        data_type: "bigint"
+        role: identifier
+        label: "Session ID"
+        description: "Foreign key to saas.sessions. Groups events that occurred within the same session window. Nullable for events generated outside a browser session (e.g. background sync events)."
+        nullable: true
+        cardinality_category: high
+        example_values: []
+        difficulty: context_dependent
+        provenance:
+          source_type: schema_constraint
+          confidence: 0.92
+          human_reviewed: false
+
+      - name: "event_type"
+        data_type: "text"
+        role: dimension
+        label: "Event Type"
+        description: "Discriminator column for the wide table. Always filter on event_type before querying events. Each event type has a different semantic meaning and different nullable column semantics. See valid_values for the complete list."
+        nullable: false
+        cardinality_category: low
+        example_values: ["page_view", "feature_used", "user_active", "sign_up", "login", "subscription_created", "subscription_cancelled"]
+        valid_values: ["page_view", "feature_used", "user_active", "sign_up", "login", "subscription_created", "subscription_cancelled"]
+        case_sensitive: true
+        difficulty: domain_dependent
+        usage_profile:
+          select_frequency: 0.71
+          where_frequency: 0.94
+          group_by_frequency: 0.22
+          join_frequency: 0.0
+          common_clauses:
+            - "WHERE events.event_type = ?"
+            - "GROUP BY events.event_type"
+        provenance:
+          source_type: ddl_comment
+          confidence: 0.95
+          human_reviewed: false
+
+      - name: "occurred_at"
+        data_type: "timestamptz"
+        role: timestamp
+        label: "Occurred At"
+        description: "UTC timestamp when the event occurred, as recorded by the client. Use this column for all time-series analysis on events. For DAU calculations, use DATE(occurred_at AT TIME ZONE 'UTC') to bucket into calendar days."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: context_dependent
+        usage_profile:
+          select_frequency: 0.62
+          where_frequency: 0.88
+          group_by_frequency: 0.77
+          join_frequency: 0.0
+          common_clauses:
+            - "WHERE events.occurred_at >= ?"
+            - "DATE_TRUNC('day', events.occurred_at)"
+            - "WHERE events.occurred_at BETWEEN ? AND ?"
+        provenance:
+          source_type: schema_constraint
+          confidence: 0.98
+          human_reviewed: false
+
+      - name: "feature_name"
+        data_type: "text"
+        role: dimension
+        label: "Feature Name"
+        description: "Name of the product feature that was used. Only populated when event_type = 'feature_used'. NULL for all other event types. Do not use this column without filtering event_type = 'feature_used' first."
+        nullable: true
+        cardinality_category: medium
+        example_values: ["export_csv", "bulk_invite", "api_key_create", "dashboard_share", "custom_report"]
+        difficulty: context_dependent
+        usage_profile:
+          select_frequency: 0.38
+          where_frequency: 0.51
+          group_by_frequency: 0.64
+          join_frequency: 0.0
+          common_clauses:
+            - "WHERE events.event_type = 'feature_used' AND events.feature_name = ?"
+            - "GROUP BY events.feature_name"
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.78
+          human_reviewed: false
+
+      - name: "page_name"
+        data_type: "text"
+        role: dimension
+        label: "Page Name"
+        description: "Name of the page that was viewed. Only populated when event_type = 'page_view'. NULL for all other event types."
+        nullable: true
+        cardinality_category: medium
+        example_values: ["dashboard", "settings", "billing", "team", "reports", "onboarding"]
+        difficulty: context_dependent
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.74
+          human_reviewed: false
+
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  # ---- sessions ------------------------------------------------------------
+
+  - model_id: "sessions"
+    name: "sessions"
+    label: "User Sessions"
+    description: >
+      One row per user session. A session is a contiguous window of user
+      activity computed server-side with a 30-minute inactivity timeout.
+      ended_at is NULL for sessions currently in progress. Always check
+      ended_at IS NOT NULL before computing duration statistics.
+    physical_source:
+      schema: "saas"
+      table: "sessions"
+    primary_key: "session_id"
+    ddl_fingerprint: "sha256:3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4"
+    row_count_estimate: 12000000
+    columns:
+
+      - name: "session_id"
+        data_type: "bigint"
+        role: identifier
+        label: "Session ID"
+        description: "Surrogate primary key. Used as the join key from events."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "user_id"
+        data_type: "bigint"
+        role: identifier
+        label: "User ID"
+        description: "Foreign key to saas.users. Identifies the user who initiated this session."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "started_at"
+        data_type: "timestamptz"
+        role: timestamp
+        label: "Session Started At"
+        description: "UTC timestamp when the session started (first event in the session window)."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        usage_profile:
+          select_frequency: 0.52
+          where_frequency: 0.61
+          group_by_frequency: 0.34
+          join_frequency: 0.0
+          common_clauses:
+            - "WHERE sessions.started_at >= ?"
+            - "DATE_TRUNC('day', sessions.started_at)"
+        provenance:
+          source_type: schema_constraint
+          confidence: 0.97
+          human_reviewed: false
+
+      - name: "ended_at"
+        data_type: "timestamptz"
+        role: timestamp
+        label: "Session Ended At"
+        description: "UTC timestamp when the session ended (30-minute inactivity timeout). NULL for sessions currently in progress. Filter ended_at IS NOT NULL for duration calculations."
+        nullable: true
+        cardinality_category: high
+        example_values: []
+        difficulty: context_dependent
+        provenance:
+          source_type: schema_constraint
+          confidence: 0.94
+          human_reviewed: false
+
+      - name: "duration_seconds"
+        data_type: "integer"
+        role: measure
+        label: "Duration (Seconds)"
+        description: "Session duration in seconds. Computed as EXTRACT(EPOCH FROM ended_at - started_at). NULL when ended_at is NULL (session in progress). Use AVG for typical session length; do not SUM."
+        nullable: true
+        cardinality_category: high
+        example_values: ["45", "182", "1204", "3821"]
+        difficulty: context_dependent
+        usage_profile:
+          select_frequency: 0.41
+          where_frequency: 0.08
+          group_by_frequency: 0.0
+          join_frequency: 0.0
+          common_clauses:
+            - "AVG(sessions.duration_seconds)"
+            - "WHERE sessions.duration_seconds > ?"
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.77
+          human_reviewed: false
+
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  # ---- subscriptions -------------------------------------------------------
+
+  - model_id: "subscriptions"
+    name: "subscriptions"
+    label: "Subscriptions"
+    description: >
+      Historical record of all subscription lifecycle events. One row per
+      subscription period. A user may have multiple rows (e.g. after upgrading
+      or re-subscribing). ended_at is NULL for the current active subscription.
+      For current MRR, always filter status = 'active'. Summing mrr_usd across
+      all rows (including cancelled) gives total contract value, not current MRR.
+    physical_source:
+      schema: "saas"
+      table: "subscriptions"
+    primary_key: "subscription_id"
+    ddl_fingerprint: "sha256:4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5"
+    row_count_estimate: 120000
+    columns:
+
+      - name: "subscription_id"
+        data_type: "bigint"
+        role: identifier
+        label: "Subscription ID"
+        description: "Surrogate primary key. No business meaning."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "user_id"
+        data_type: "bigint"
+        role: identifier
+        label: "User ID"
+        description: "Foreign key to saas.users. Identifies the subscribing user."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "plan_id"
+        data_type: "integer"
+        role: identifier
+        label: "Plan ID"
+        description: "Foreign key to saas.plans. Identifies the plan tier for this subscription period."
+        nullable: false
+        cardinality_category: low
+        example_values: []
+        difficulty: self_evident
+        usage_profile:
+          select_frequency: 0.44
+          where_frequency: 0.38
+          group_by_frequency: 0.52
+          join_frequency: 0.81
+          common_clauses:
+            - "JOIN saas.plans pl ON subscriptions.plan_id = pl.plan_id"
+            - "GROUP BY subscriptions.plan_id"
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "started_at"
+        data_type: "timestamptz"
+        role: timestamp
+        label: "Subscription Started At"
+        description: "UTC timestamp when this subscription period began. Use for cohort analysis and subscription trend reporting."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        usage_profile:
+          select_frequency: 0.47
+          where_frequency: 0.54
+          group_by_frequency: 0.38
+          join_frequency: 0.0
+          common_clauses:
+            - "WHERE subscriptions.started_at >= ?"
+            - "DATE_TRUNC('month', subscriptions.started_at)"
+        provenance:
+          source_type: schema_constraint
+          confidence: 0.96
+          human_reviewed: false
+
+      - name: "ended_at"
+        data_type: "timestamptz"
+        role: timestamp
+        label: "Subscription Ended At"
+        description: "UTC timestamp when this subscription period ended. NULL for the currently active subscription. Do not use ended_at IS NULL as the sole active-subscription filter — use status = 'active' which is maintained by the application layer and handles edge cases (e.g. grace periods)."
+        nullable: true
+        cardinality_category: high
+        example_values: []
+        difficulty: context_dependent
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.72
+          human_reviewed: false
+
+      - name: "mrr_usd"
+        data_type: "numeric"
+        role: measure
+        label: "MRR (USD)"
+        description: >
+          Monthly recurring revenue in USD for this subscription. Normalised
+          to a monthly amount — annual plans are divided by 12. This is the
+          per-subscription contribution to MRR. For current total MRR, filter
+          status = 'active' and SUM. Do not SUM across multiple time periods
+          without explicit instruction — MRR is a point-in-time stock metric,
+          not a flow. Summing across months gives cumulative contract value.
+        nullable: false
+        cardinality_category: low
+        example_values: ["0.00", "49.00", "149.00", "499.00", "1499.00"]
+        difficulty: domain_dependent
+        usage_profile:
+          select_frequency: 0.68
+          where_frequency: 0.04
+          group_by_frequency: 0.0
+          join_frequency: 0.0
+          common_clauses:
+            - "SUM(subscriptions.mrr_usd)"
+            - "SUM(subscriptions.mrr_usd) AS total_mrr"
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.69
+          human_reviewed: false
+
+      - name: "status"
+        data_type: "text"
+        role: dimension
+        label: "Subscription Status"
+        description: "Current lifecycle status of this subscription. 'active' means the subscription is in good standing and contributing to MRR. 'cancelled' means the user has cancelled. 'paused' means billing is paused (e.g. dunning). For MRR, filter on status = 'active' only."
+        nullable: false
+        cardinality_category: low
+        example_values: ["active", "cancelled", "paused"]
+        valid_values: ["active", "cancelled", "paused"]
+        case_sensitive: true
+        difficulty: context_dependent
+        usage_profile:
+          select_frequency: 0.51
+          where_frequency: 0.79
+          group_by_frequency: 0.23
+          join_frequency: 0.0
+          common_clauses:
+            - "WHERE subscriptions.status = 'active'"
+            - "WHERE subscriptions.status = 'cancelled'"
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.82
+          human_reviewed: false
+
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  # ---- plans ---------------------------------------------------------------
+
+  - model_id: "plans"
+    name: "plans"
+    label: "Plans"
+    description: >
+      Reference table of subscription plans. One row per plan tier. Rarely
+      changes. Used as a dimension table joined from users and subscriptions.
+    physical_source:
+      schema: "saas"
+      table: "plans"
+    primary_key: "plan_id"
+    ddl_fingerprint: "sha256:5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6"
+    row_count_estimate: 8
+    columns:
+
+      - name: "plan_id"
+        data_type: "integer"
+        role: identifier
+        label: "Plan ID"
+        description: "Surrogate primary key. Used as the join key from users and subscriptions."
+        nullable: false
+        cardinality_category: low
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "plan_name"
+        data_type: "text"
+        role: dimension
+        label: "Plan Name"
+        description: "Human-readable name of the plan (e.g. 'Starter Monthly', 'Growth Annual'). Use for display in reports. Use tier for grouping across billing periods."
+        nullable: false
+        cardinality_category: low
+        example_values: ["Free", "Starter Monthly", "Starter Annual", "Growth Monthly", "Growth Annual", "Enterprise"]
+        difficulty: self_evident
+        usage_profile:
+          select_frequency: 0.78
+          where_frequency: 0.22
+          group_by_frequency: 0.54
+          join_frequency: 0.0
+          common_clauses:
+            - "GROUP BY pl.plan_name"
+            - "SELECT pl.plan_name"
+        provenance:
+          source_type: schema_constraint
+          confidence: 0.96
+          human_reviewed: false
+
+      - name: "price_usd"
+        data_type: "numeric"
+        role: measure
+        label: "List Price (USD)"
+        description: "Published list price in USD. For monthly plans this is the monthly charge; for annual plans this is the total annual charge. Do not use as MRR directly — use subscriptions.mrr_usd which is already normalised to monthly."
+        nullable: false
+        cardinality_category: low
+        example_values: ["0.00", "49.00", "470.00", "149.00", "1428.00", "499.00"]
+        difficulty: domain_dependent
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.74
+          human_reviewed: false
+
+      - name: "billing_period"
+        data_type: "text"
+        role: dimension
+        label: "Billing Period"
+        description: "Billing cadence for this plan. 'monthly' = charged each month, 'annual' = charged once per year. Annual subscriptions are already normalised to monthly MRR in subscriptions.mrr_usd."
+        nullable: false
+        cardinality_category: low
+        example_values: ["monthly", "annual", "free"]
+        valid_values: ["monthly", "annual", "free"]
+        case_sensitive: true
+        difficulty: context_dependent
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.81
+          human_reviewed: false
+
+      - name: "tier"
+        data_type: "text"
+        role: dimension
+        label: "Plan Tier"
+        description: "Feature tier of the plan. Use this column for grouping across monthly and annual variants of the same tier. 'free' includes users on free plans. 'enterprise' plans have custom pricing."
+        nullable: false
+        cardinality_category: low
+        example_values: ["free", "starter", "growth", "enterprise"]
+        valid_values: ["free", "starter", "growth", "enterprise"]
+        case_sensitive: true
+        difficulty: context_dependent
+        usage_profile:
+          select_frequency: 0.61
+          where_frequency: 0.44
+          group_by_frequency: 0.73
+          join_frequency: 0.0
+          common_clauses:
+            - "GROUP BY pl.tier"
+            - "WHERE pl.tier = ?"
+        provenance:
+          source_type: llm_inferred
+          source_ref: "xiyan_pass_2"
+          confidence: 0.83
+          human_reviewed: false
+
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+# ---------------------------------------------------------------------------
+# RELATIONSHIPS
+# ---------------------------------------------------------------------------
+
+relationships:
+
+  - relationship_id: "events_to_users"
+    from_model: "events"
+    from_column: "user_id"
+    to_model: "users"
+    to_column: "user_id"
+    relationship_type: many_to_one
+    join_condition: "events.user_id = users.user_id"
+    semantic_role: "Resolves user attributes (country, plan, churn status) for an event."
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  - relationship_id: "events_to_sessions"
+    from_model: "events"
+    from_column: "session_id"
+    to_model: "sessions"
+    to_column: "session_id"
+    relationship_type: many_to_one
+    join_condition: "events.session_id = sessions.session_id"
+    semantic_role: "Resolves session metadata for an event. Not always valid — some events have a NULL session_id."
+    always_valid: false
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 0.93
+      human_reviewed: false
+
+  - relationship_id: "sessions_to_users"
+    from_model: "sessions"
+    from_column: "user_id"
+    to_model: "users"
+    to_column: "user_id"
+    relationship_type: many_to_one
+    join_condition: "sessions.user_id = users.user_id"
+    semantic_role: "Resolves user attributes for a session."
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  - relationship_id: "subscriptions_to_users"
+    from_model: "subscriptions"
+    from_column: "user_id"
+    to_model: "users"
+    to_column: "user_id"
+    relationship_type: many_to_one
+    join_condition: "subscriptions.user_id = users.user_id"
+    semantic_role: "Resolves user attributes for a subscription record."
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  - relationship_id: "subscriptions_to_plans"
+    from_model: "subscriptions"
+    from_column: "plan_id"
+    to_model: "plans"
+    to_column: "plan_id"
+    relationship_type: many_to_one
+    join_condition: "subscriptions.plan_id = plans.plan_id"
+    semantic_role: "Resolves plan metadata (tier, billing period, price) for a subscription."
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  - relationship_id: "users_to_plans"
+    from_model: "users"
+    from_column: "plan_id"
+    to_model: "plans"
+    to_column: "plan_id"
+    relationship_type: many_to_one
+    join_condition: "users.plan_id = plans.plan_id"
+    semantic_role: "Resolves the user's current plan. Use only for current-state queries. For historical plan assignments, join subscriptions to plans instead."
+    always_valid: false
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 0.88
+      human_reviewed: false
+
+# ---------------------------------------------------------------------------
+# CONCEPTS  (extended tier)
+# ---------------------------------------------------------------------------
+
+concepts:
+
+  - concept_id: "active_user"
+    label: "Active User"
+    description: >
+      A user who generated at least one user_active event in a given time
+      window. DAU is the count of distinct active users in a calendar day.
+      WAU and MAU extend this to weekly and monthly windows respectively.
+      Always filter event_type = 'user_active' — do not count distinct user_id
+      across all event types.
+    definition_sql: >
+      SELECT
+        DATE(e.occurred_at AT TIME ZONE 'UTC') AS activity_date,
+        COUNT(DISTINCT e.user_id)              AS dau
+      FROM saas.events e
+      WHERE e.event_type = 'user_active'
+        AND e.occurred_at >= :start_date
+        AND e.occurred_at <  :end_date
+      GROUP BY DATE(e.occurred_at AT TIME ZONE 'UTC')
+      ORDER BY activity_date
+    broader: null
+    maps_to_models:
+      - "events"
+      - "users"
+    maps_to_columns:
+      - model: "events"
+        column: "user_id"
+      - model: "events"
+        column: "event_type"
+      - model: "events"
+        column: "occurred_at"
+    provenance:
+      source_type: user_defined
+      confidence: 1.0
+      human_reviewed: true
+
+  - concept_id: "monthly_recurring_revenue"
+    label: "Monthly Recurring Revenue (MRR)"
+    description: >
+      The normalised monthly value of all active subscriptions at a point in
+      time. MRR is a stock metric — it represents the current run-rate, not
+      a cumulative sum. To compute MRR for a specific month, filter
+      subscriptions where started_at <= last day of month AND (ended_at IS NULL
+      OR ended_at > last day of month) AND status = 'active'. Do not SUM
+      mrr_usd across multiple months without explicit user instruction.
+    definition_sql: >
+      SELECT
+        SUM(s.mrr_usd) AS mrr_usd
+      FROM saas.subscriptions s
+      WHERE s.status = 'active'
+        AND s.started_at <= :as_of_date
+        AND (s.ended_at IS NULL OR s.ended_at > :as_of_date)
+    broader: null
+    maps_to_models:
+      - "subscriptions"
+      - "plans"
+    maps_to_columns:
+      - model: "subscriptions"
+        column: "mrr_usd"
+      - model: "subscriptions"
+        column: "status"
+      - model: "subscriptions"
+        column: "started_at"
+      - model: "subscriptions"
+        column: "ended_at"
+    provenance:
+      source_type: user_defined
+      confidence: 1.0
+      human_reviewed: true
+
+  - concept_id: "churn"
+    label: "Churn"
+    description: >
+      A user churn event occurs when a paying subscriber cancels their
+      subscription. Churn is tracked in two places: users.churned_at (the
+      timestamp the user churned) and the subscription row transitioning to
+      status = 'cancelled'. Churn rate for a cohort = churned users in period
+      / active users at start of period. Do not count free-plan cancellations
+      as churn — only paid-plan cancellations.
+    definition_sql: >
+      SELECT
+        DATE_TRUNC('month', u.churned_at) AS churn_month,
+        COUNT(DISTINCT u.user_id)         AS churned_users
+      FROM saas.users u
+      JOIN saas.subscriptions s
+        ON u.user_id = s.user_id
+        AND s.status = 'cancelled'
+      JOIN saas.plans pl
+        ON s.plan_id = pl.plan_id
+        AND pl.tier != 'free'
+      WHERE u.churned_at IS NOT NULL
+        AND u.churned_at >= :start_date
+        AND u.churned_at <  :end_date
+      GROUP BY DATE_TRUNC('month', u.churned_at)
+      ORDER BY churn_month
+    broader: null
+    maps_to_models:
+      - "users"
+      - "subscriptions"
+      - "plans"
+    maps_to_columns:
+      - model: "users"
+        column: "churned_at"
+      - model: "subscriptions"
+        column: "status"
+      - model: "plans"
+        column: "tier"
+    provenance:
+      source_type: log_inferred
+      source_ref: "queryid:7781293"
+      confidence: 0.77
+      human_reviewed: false
+
+# ---------------------------------------------------------------------------
+# METRICS  (core tier)
+# ---------------------------------------------------------------------------
+
+metrics:
+
+  - metric_id: "daily_active_users"
+    name: "daily_active_users"
+    label: "Daily Active Users (DAU)"
+    description: >
+      Count of distinct users who generated at least one user_active event on
+      a given calendar day. DAU is a semi-additive metric — it can be
+      disaggregated by user attributes (country, plan tier) but cannot be
+      summed across days (that gives cumulative unique users, not average DAU).
+      Always filter event_type = 'user_active'. Time dimension is
+      events.occurred_at bucketed to calendar day.
+    expression: "COUNT(DISTINCT events.user_id)"
+    aggregation: count_distinct
+    default_time_dimension:
+      model: "events"
+      column: "occurred_at"
+    valid_dimensions:
+      - model: "users"
+        column: "country"
+      - model: "users"
+        column: "plan_id"
+      - model: "plans"
+        column: "tier"
+    invalid_dimensions:
+      - model: "events"
+        column: "event_id"
+        reason: "Surrogate key. Grouping by event_id produces one row per event, not a meaningful DAU aggregate."
+      - model: "events"
+        column: "session_id"
+        reason: "A user may have multiple sessions per day. Grouping by session_id breaks the distinct-user counting semantics of DAU."
+    required_filters:
+      - expression: "events.event_type = 'user_active'"
+        reason: "DAU is defined as users with a user_active event. Omitting this filter counts all event types and inflates DAU with bot traffic and system-generated events."
+    additivity: semi_additive
+    provenance:
+      source_type: log_inferred
+      source_ref: "queryid:5512019,queryid:5512044"
+      confidence: 0.84
+      human_reviewed: false
+
+  - metric_id: "monthly_recurring_revenue"
+    name: "monthly_recurring_revenue"
+    label: "Monthly Recurring Revenue (MRR)"
+    description: >
+      Sum of mrr_usd across all active subscriptions as of a point in time.
+      MRR is a semi-additive metric — it can be disaggregated by plan tier or
+      user country but must not be summed across time periods (summing gives
+      cumulative contract value, not MRR). Always filter status = 'active'.
+      Default time dimension is subscriptions.started_at for trend reporting;
+      for as-of queries use a date filter on started_at and ended_at.
+    expression: "SUM(subscriptions.mrr_usd)"
+    aggregation: sum
+    default_time_dimension:
+      model: "subscriptions"
+      column: "started_at"
+    valid_dimensions:
+      - model: "plans"
+        column: "tier"
+      - model: "plans"
+        column: "billing_period"
+      - model: "plans"
+        column: "plan_name"
+      - model: "users"
+        column: "country"
+    invalid_dimensions:
+      - model: "subscriptions"
+        column: "subscription_id"
+        reason: "Surrogate key. Produces one row per subscription, not a meaningful MRR aggregate."
+      - model: "subscriptions"
+        column: "ended_at"
+        reason: "Grouping by ended_at fragments MRR across cancellation dates rather than measuring the current run-rate."
+    required_filters:
+      - expression: "subscriptions.status = 'active'"
+        reason: "MRR must include only active subscriptions. Including cancelled or paused subscriptions overstates MRR with historical contract value."
+    additivity: semi_additive
+    provenance:
+      source_type: log_inferred
+      source_ref: "queryid:6614302,queryid:6614387"
+      confidence: 0.81
+      human_reviewed: false
+
+  - metric_id: "feature_event_count"
+    name: "feature_event_count"
+    label: "Feature Usage Event Count"
+    description: >
+      Count of feature_used events for a specific feature. Use this metric
+      to measure feature adoption and engagement. Always supply a feature_name
+      filter — the required_filter ensures event_type is always set to
+      'feature_used' to prevent mixing with other event types.
+    expression: "COUNT(events.event_id)"
+    aggregation: count
+    default_time_dimension:
+      model: "events"
+      column: "occurred_at"
+    valid_dimensions:
+      - model: "events"
+        column: "feature_name"
+      - model: "users"
+        column: "country"
+      - model: "plans"
+        column: "tier"
+    invalid_dimensions:
+      - model: "events"
+        column: "page_name"
+        reason: "page_name is only populated for page_view events. It is always NULL for feature_used events."
+    required_filters:
+      - expression: "events.event_type = 'feature_used'"
+        reason: "feature_event_count must count only feature_used events. Omitting this mixes page views and other event types into the count."
+    additivity: fully_additive
+    provenance:
+      source_type: log_inferred
+      source_ref: "queryid:8821044"
+      confidence: 0.78
+      human_reviewed: false
+
+  - metric_id: "avg_session_duration"
+    name: "avg_session_duration"
+    label: "Average Session Duration (Seconds)"
+    description: >
+      Average duration in seconds of completed user sessions. Excludes sessions
+      currently in progress (ended_at IS NULL). Non-additive — do not SUM
+      this metric. Use for engagement benchmarking and product health tracking.
+    expression: "AVG(sessions.duration_seconds)"
+    aggregation: avg
+    default_time_dimension:
+      model: "sessions"
+      column: "started_at"
+    valid_dimensions:
+      - model: "users"
+        column: "country"
+      - model: "plans"
+        column: "tier"
+    invalid_dimensions:
+      - model: "sessions"
+        column: "session_id"
+        reason: "Surrogate key. Grouping by session_id produces one row per session with the duration of that session — not a meaningful aggregate."
+    required_filters:
+      - expression: "sessions.ended_at IS NOT NULL"
+        reason: "Sessions with ended_at IS NULL are in progress and have no computed duration_seconds. Including them produces NULL values in the average."
+    additivity: non_additive
+    provenance:
+      source_type: log_inferred
+      source_ref: "queryid:9933201"
+      confidence: 0.73
+      human_reviewed: false
+
+# ---------------------------------------------------------------------------
+# QUERY TEMPLATES  (extended tier)
+# ---------------------------------------------------------------------------
+
+query_templates:
+
+  - template_id: "dau_trend"
+    description: "Daily active users over a date range, optionally broken down by plan tier. Standard engagement trend report."
+    sql_template: >
+      SELECT
+        DATE(e.occurred_at AT TIME ZONE 'UTC') AS activity_date,
+        pl.tier,
+        COUNT(DISTINCT e.user_id)              AS dau
+      FROM saas.events e
+      JOIN saas.users u  ON e.user_id  = u.user_id
+      JOIN saas.plans pl ON u.plan_id  = pl.plan_id
+      WHERE e.event_type  = 'user_active'
+        AND e.occurred_at >= :start_date
+        AND e.occurred_at <  :end_date
+      GROUP BY DATE(e.occurred_at AT TIME ZONE 'UTC'), pl.tier
+      ORDER BY activity_date, pl.tier
+    parameters:
+      - name: start_date
+        data_type: timestamptz
+        description: "Start of the reporting window (inclusive). Format: ISO 8601 (e.g. '2026-01-01T00:00:00Z')."
+      - name: end_date
+        data_type: timestamptz
+        description: "End of the reporting window (exclusive). Format: ISO 8601."
+    provenance:
+      source_type: log_inferred
+      source_ref: "queryid:5512019"
+      confidence: 0.87
+      human_reviewed: false
+
+  - template_id: "mrr_by_plan_tier"
+    description: "Current MRR broken down by plan tier. Shows revenue concentration across plan tiers at a given point in time."
+    sql_template: >
+      SELECT
+        pl.tier,
+        pl.billing_period,
+        COUNT(s.subscription_id) AS subscriber_count,
+        SUM(s.mrr_usd)           AS mrr_usd
+      FROM saas.subscriptions s
+      JOIN saas.plans pl ON s.plan_id = pl.plan_id
+      WHERE s.status    = 'active'
+        AND s.started_at <= :as_of_date
+        AND (s.ended_at IS NULL OR s.ended_at > :as_of_date)
+      GROUP BY pl.tier, pl.billing_period
+      ORDER BY mrr_usd DESC
+    parameters:
+      - name: as_of_date
+        data_type: timestamptz
+        description: "The point-in-time date for the MRR snapshot. Use NOW() for current MRR. Format: ISO 8601."
+    provenance:
+      source_type: log_inferred
+      source_ref: "queryid:6614302"
+      confidence: 0.89
+      human_reviewed: false
+
+  - template_id: "feature_adoption_by_plan"
+    description: "Feature usage event counts per feature, broken down by plan tier. Identifies which features drive engagement on which plans."
+    sql_template: >
+      SELECT
+        e.feature_name,
+        pl.tier,
+        COUNT(e.event_id)              AS event_count,
+        COUNT(DISTINCT e.user_id)      AS unique_users
+      FROM saas.events e
+      JOIN saas.users u  ON e.user_id  = u.user_id
+      JOIN saas.plans pl ON u.plan_id  = pl.plan_id
+      WHERE e.event_type   = 'feature_used'
+        AND e.occurred_at >= :start_date
+        AND e.occurred_at <  :end_date
+      GROUP BY e.feature_name, pl.tier
+      ORDER BY event_count DESC
+    parameters:
+      - name: start_date
+        data_type: timestamptz
+        description: "Start of the reporting window (inclusive). Format: ISO 8601."
+      - name: end_date
+        data_type: timestamptz
+        description: "End of the reporting window (exclusive). Format: ISO 8601."
+    provenance:
+      source_type: log_inferred
+      source_ref: "queryid:8821044"
+      confidence: 0.82
+      human_reviewed: false

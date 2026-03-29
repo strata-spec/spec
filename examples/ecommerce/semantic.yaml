@@ -1,0 +1,960 @@
+smif_version: "0.1.1"
+generated_at: "2026-03-29T12:00:00Z"
+tool_version: "strata/0.1.1"
+source:
+  type: postgres
+  host_fingerprint: "sha256:b4c8d2e6f0a3b7c1d5e9f2a6b0c4d8e2f6a0b4c8d2e6f0a3b7c1d5e9f2a6b0c4"
+  schema_names:
+    - ecommerce
+
+# ---------------------------------------------------------------------------
+# DOMAIN
+# ---------------------------------------------------------------------------
+
+domain:
+  name: "E-commerce Platform"
+  description: >
+    Transactional e-commerce database for a direct-to-consumer retail operation.
+    Tracks customer accounts, product catalogue, inventory levels, orders, and
+    fulfilment events. Primary consumers are the analytics team (revenue dashboards,
+    cohort analysis), operations (fulfilment monitoring), and the customer support
+    team (order lookup). This database is the system of record for all
+    post-checkout activity.
+  key_concepts:
+    - "Order: a single checkout event; lifecycle is pending → confirmed → shipped → delivered (or cancelled/refunded)"
+    - "Order Item: a single SKU line within an order with quantity and the unit price captured at purchase time"
+    - "Customer: a registered account holder; guest checkouts have NULL customer_id on orders"
+    - "Product: a sellable catalogue item; discontinued items have status = 'discontinued', not deleted"
+    - "Revenue: sum of order_items.unit_price * order_items.quantity for non-cancelled, non-refunded orders"
+    - "Gross Margin: Revenue minus COGS (order_items.unit_cost); COGS may be NULL for unmatched supplier invoices"
+  temporal_model:
+    business_date_column: "created_at"
+    timezone: "UTC"
+    note: >
+      All timestamps are stored in UTC. Use orders.created_at as the primary time
+      dimension for revenue trending. Do not use orders.updated_at for trend analysis —
+      it reflects the most recent status change, not the purchase date.
+  known_gotchas:
+    - "orders.total_amount is a denormalised convenience field. Always aggregate from order_items.unit_price * order_items.quantity for accurate revenue."
+    - "products.price is the current catalogue price. The actual sale price is in order_items.unit_price, captured at order creation."
+    - "customers.deleted_at IS NULL must always be appended for GDPR compliance. Deleted customer PII is nulled."
+    - "order_items.unit_cost is NULL for ~4% of items. Exclude NULL costs from margin calculations and document the exclusion."
+    - "orders.status uses lowercase string literals. All filter values must be lowercase."
+    - "inventory.quantity_on_hand can be legitimately negative (backorders). Do not treat negative values as data errors."
+    - "orders.customer_id is NULL for guest checkouts (~22% of orders). Do not exclude NULL customer_id from revenue queries unless asked."
+  provenance:
+    source_type: llm_inferred
+    source_ref: "strata_init_pass_1"
+    confidence: 0.83
+    human_reviewed: false
+
+# ---------------------------------------------------------------------------
+# MODELS
+# ---------------------------------------------------------------------------
+
+models:
+
+  # ---- customers ----------------------------------------------------------
+
+  - model_id: "customers"
+    name: "customers"
+    label: "Customers"
+    description: >
+      Registered customer accounts. One row per customer. Guest checkouts are not
+      represented here — they appear in orders with a NULL customer_id. GDPR
+      right-to-erasure requests are fulfilled by nulling PII columns and setting
+      deleted_at; the row is never physically removed.
+    physical_source:
+      schema: "ecommerce"
+      table: "customers"
+    primary_key: "customer_id"
+    ddl_fingerprint: "sha256:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2"
+    row_count_estimate: 185000
+    required_filters:
+      - expression: "customers.deleted_at IS NULL"
+        reason: >
+          customers uses soft-delete semantics for GDPR compliance. Omitting this filter
+          includes erased customer records where PII has been nulled, producing misleading
+          results and potentially exposing placeholder null values as real data.
+    columns:
+
+      - name: "customer_id"
+        data_type: "bigint"
+        role: identifier
+        label: "Customer ID"
+        description: >
+          Surrogate primary key. Has no business meaning beyond uniquely identifying
+          a customer account. Use for joins; do not display or filter on this column directly.
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "email"
+        data_type: "varchar(255)"
+        role: identifier
+        label: "Email Address"
+        description: >
+          Customer email address. Unique per account. Contains personal data —
+          do not expose in aggregated outputs or log. Nulled for erased customers.
+        nullable: true
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: ddl_comment
+          source_ref: "ecommerce.customers DDL comment, line 4"
+          confidence: 1.0
+          human_reviewed: true
+
+      - name: "name"
+        data_type: "varchar(255)"
+        role: dimension
+        label: "Customer Name"
+        description: >
+          Full name of the customer as entered at registration. Contains personal data.
+          Use customer_id for grouping in analytical queries, not this column.
+          Nulled for erased customers.
+        nullable: true
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: ddl_comment
+          source_ref: "ecommerce.customers DDL comment, line 5"
+          confidence: 1.0
+          human_reviewed: true
+
+      - name: "customer_since"
+        data_type: "date"
+        role: timestamp
+        label: "Customer Since"
+        description: >
+          Date the customer account was first created. This is not the date of first
+          purchase — a customer may register and not place an order immediately.
+          Use orders.created_at for first-purchase cohort analysis.
+        nullable: false
+        cardinality_category: high
+        example_values: ["2021-01-15", "2023-06-30"]
+        difficulty: context_dependent
+        provenance:
+          source_type: llm_inferred
+          agent: "strata-annotator-v1"
+          confidence: 0.78
+          human_reviewed: false
+
+      - name: "country_code"
+        data_type: "char(2)"
+        role: dimension
+        label: "Country Code"
+        description: >
+          ISO 3166-1 alpha-2 country code for the customer's registered billing country.
+          Used for geographic segmentation and tax-rate lookups. Not necessarily the
+          shipping destination — shipping country is on order_items.
+        nullable: true
+        cardinality_category: low
+        example_values: ["US", "GB", "CA", "DE", "AU"]
+        valid_values: ["US", "GB", "CA", "DE", "AU", "FR", "NL", "SE", "JP", "SG"]
+        case_sensitive: true
+        difficulty: self_evident
+        provenance:
+          source_type: user_defined
+          confidence: 1.0
+          human_reviewed: true
+
+      - name: "tier"
+        data_type: "varchar(20)"
+        role: dimension
+        label: "Customer Tier"
+        description: >
+          Loyalty tier assigned by the CRM system based on lifetime spend. Tiers are
+          assigned nightly by a batch job. 'vip' customers receive priority fulfilment
+          and access to exclusive products.
+        nullable: true
+        cardinality_category: low
+        example_values: ["standard", "silver", "gold", "vip"]
+        valid_values: ["standard", "silver", "gold", "vip"]
+        case_sensitive: true
+        difficulty: context_dependent
+        provenance:
+          source_type: code_extracted
+          source_ref: "crm_tier_assignment_job.py:L88"
+          confidence: 0.95
+          human_reviewed: false
+
+      - name: "deleted_at"
+        data_type: "timestamptz"
+        role: timestamp
+        label: "Deleted At"
+        description: >
+          Timestamp when this customer was soft-deleted (GDPR erasure). NULL means the
+          customer is active. When non-NULL, PII columns (email, name, phone) have
+          been set to NULL. Always filter deleted_at IS NULL for active customers.
+        nullable: true
+        cardinality_category: low
+        difficulty: context_dependent
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  # ---- products -----------------------------------------------------------
+
+  - model_id: "products"
+    name: "products"
+    label: "Products"
+    description: >
+      Product catalogue. One row per sellable item. Products are never deleted —
+      discontinued items have status = 'discontinued'. The price column reflects
+      the current catalogue price; the historical sale price for each transaction
+      is captured in order_items.unit_price.
+    physical_source:
+      schema: "ecommerce"
+      table: "products"
+    primary_key: "product_id"
+    ddl_fingerprint: "sha256:2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3"
+    row_count_estimate: 12000
+    columns:
+
+      - name: "product_id"
+        data_type: "integer"
+        role: identifier
+        label: "Product ID"
+        description: >
+          Surrogate primary key for a product. Has no business meaning. Use for joins to
+          order_items; do not display this column.
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "sku"
+        data_type: "varchar(64)"
+        role: identifier
+        label: "SKU"
+        description: >
+          Stock-keeping unit code assigned by the merchandising team. Unique per product.
+          Used as the external-facing product identifier in catalogue exports and supplier
+          communications. Prefer product_id for database joins.
+        nullable: false
+        cardinality_category: high
+        example_values: ["TSHIRT-BLK-M", "SHOES-WHT-42", "HAT-RED-OS"]
+        difficulty: self_evident
+        provenance:
+          source_type: ddl_comment
+          source_ref: "ecommerce.products DDL comment, line 3"
+          confidence: 1.0
+          human_reviewed: true
+
+      - name: "name"
+        data_type: "varchar(255)"
+        role: dimension
+        label: "Product Name"
+        description: "Human-readable product name as displayed in the catalogue and on receipts."
+        nullable: false
+        cardinality_category: high
+        example_values: ["Classic Black T-Shirt (M)", "White Running Shoes (EU 42)"]
+        difficulty: self_evident
+        provenance:
+          source_type: llm_inferred
+          agent: "strata-annotator-v1"
+          confidence: 0.90
+          human_reviewed: false
+
+      - name: "category"
+        data_type: "varchar(64)"
+        role: dimension
+        label: "Category"
+        description: >
+          Top-level product category. Used for revenue segmentation and catalogue browsing.
+          Hierarchy is flat — there are no sub-categories in this table. Sub-category data
+          lives in the separate product_taxonomy table (not part of this semantic model).
+        nullable: false
+        cardinality_category: low
+        example_values: ["apparel", "footwear", "accessories", "homewares"]
+        valid_values: ["apparel", "footwear", "accessories", "homewares", "electronics", "beauty", "sports"]
+        case_sensitive: true
+        difficulty: self_evident
+        provenance:
+          source_type: log_inferred
+          source_ref: "query_log_2026_q1.jsonl"
+          confidence: 0.87
+          human_reviewed: false
+
+      - name: "price"
+        data_type: "numeric(10,2)"
+        role: measure
+        label: "Current Price (USD)"
+        description: >
+          Current catalogue price in USD. This value changes over time as prices are
+          updated. Do not use this column to reconstruct historical revenue — use
+          order_items.unit_price instead, which is the price captured at purchase time.
+        nullable: false
+        cardinality_category: high
+        example_values: ["29.99", "89.95", "149.00"]
+        difficulty: context_dependent
+        provenance:
+          source_type: llm_inferred
+          agent: "strata-annotator-v1"
+          confidence: 0.72
+          human_reviewed: false
+
+      - name: "status"
+        data_type: "varchar(20)"
+        role: dimension
+        label: "Product Status"
+        description: >
+          Lifecycle status of the product. 'active' products are available for purchase.
+          'discontinued' products are no longer sold but retained for historical reporting.
+          'draft' products are not yet published to the storefront.
+        nullable: false
+        cardinality_category: low
+        example_values: ["active", "discontinued", "draft"]
+        valid_values: ["active", "discontinued", "draft"]
+        case_sensitive: true
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  # ---- orders -------------------------------------------------------------
+
+  - model_id: "orders"
+    name: "orders"
+    label: "Orders"
+    description: >
+      One row per customer checkout event. The header record for an order —
+      line-level detail is in order_items. Orders are never deleted. Guest checkouts
+      have a NULL customer_id. The total_amount column is a denormalised convenience
+      field; for accurate revenue always aggregate from order_items.
+    physical_source:
+      schema: "ecommerce"
+      table: "orders"
+    primary_key: "order_id"
+    ddl_fingerprint: "sha256:3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4"
+    row_count_estimate: 3400000
+    columns:
+
+      - name: "order_id"
+        data_type: "bigint"
+        role: identifier
+        label: "Order ID"
+        description: "Surrogate primary key for an order. Has no business meaning."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "customer_id"
+        data_type: "bigint"
+        role: identifier
+        label: "Customer ID"
+        description: >
+          Foreign key to ecommerce.customers. NULL for guest checkouts (~22% of orders).
+          Do not exclude NULL rows from revenue queries unless the question specifically
+          asks about registered customers only.
+        nullable: true
+        cardinality_category: high
+        example_values: []
+        difficulty: context_dependent
+        usage_profile:
+          join_frequency: 0.78
+          where_frequency: 0.12
+          select_frequency: 0.34
+          group_by_frequency: 0.41
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "status"
+        data_type: "varchar(20)"
+        role: dimension
+        label: "Order Status"
+        description: >
+          Current lifecycle status of the order. Transitions are strictly
+          pending → confirmed → shipped → delivered. Cancellation and refund are
+          terminal states reachable from any non-delivered stage. All values are
+          lowercase — filter with lowercase string literals only.
+        nullable: false
+        cardinality_category: low
+        example_values: ["pending", "confirmed", "shipped", "delivered", "cancelled", "refunded"]
+        valid_values: ["pending", "confirmed", "shipped", "delivered", "cancelled", "refunded"]
+        case_sensitive: true
+        difficulty: context_dependent
+        usage_profile:
+          where_frequency: 0.91
+          select_frequency: 0.45
+          group_by_frequency: 0.38
+          join_frequency: 0.02
+          common_clauses:
+            - "status NOT IN ('cancelled', 'refunded')"
+            - "status = 'delivered'"
+            - "status = 'shipped'"
+        provenance:
+          source_type: log_inferred
+          source_ref: "query_log_2026_q1.jsonl"
+          confidence: 0.94
+          human_reviewed: true
+
+      - name: "created_at"
+        data_type: "timestamptz"
+        role: timestamp
+        label: "Order Date"
+        description: >
+          Timestamp when the order was placed by the customer, in UTC. This is the
+          primary time dimension for revenue trending and cohort analysis. Do not
+          use updated_at for trend analysis — it reflects the most recent status
+          change, not the purchase date.
+        nullable: false
+        cardinality_category: high
+        example_values: ["2026-01-15T10:23:45Z", "2026-03-01T08:00:00Z"]
+        difficulty: self_evident
+        usage_profile:
+          select_frequency: 0.62
+          where_frequency: 0.74
+          group_by_frequency: 0.55
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "total_amount"
+        data_type: "numeric(12,2)"
+        role: measure
+        label: "Order Total (USD)"
+        description: >
+          Denormalised order total in USD calculated at checkout. May disagree with
+          the sum of order_items when promotions are applied (known data quality issue).
+          For accurate revenue analysis, always aggregate from
+          order_items.unit_price * order_items.quantity.
+        nullable: false
+        cardinality_category: high
+        example_values: ["59.98", "129.95", "249.00"]
+        difficulty: ambiguous
+        provenance:
+          source_type: llm_inferred
+          agent: "strata-annotator-v1"
+          confidence: 0.55
+          human_reviewed: true
+
+      - name: "shipping_country_code"
+        data_type: "char(2)"
+        role: dimension
+        label: "Shipping Country"
+        description: >
+          ISO 3166-1 alpha-2 country code for the order's shipping destination.
+          Distinct from customers.country_code, which is the billing country.
+          Use this column for fulfilment geography and international shipping analysis.
+        nullable: true
+        cardinality_category: low
+        example_values: ["US", "GB", "CA", "DE", "AU"]
+        difficulty: context_dependent
+        provenance:
+          source_type: catalog_import
+          source_ref: "internal-data-catalog:ecommerce.orders.shipping_country_code"
+          confidence: 0.97
+          human_reviewed: true
+
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  # ---- order_items --------------------------------------------------------
+
+  - model_id: "order_items"
+    name: "order_items"
+    label: "Order Items"
+    description: >
+      Line-level detail for each order. One row per product within an order.
+      Contains the unit price at time of purchase (immutable), quantity, and
+      COGS (populated from supplier invoice, may be NULL for ~4% of rows).
+      This is the source of truth for revenue and margin calculations.
+    physical_source:
+      schema: "ecommerce"
+      table: "order_items"
+    primary_key: "order_item_id"
+    ddl_fingerprint: "sha256:4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5"
+    row_count_estimate: 8900000
+    columns:
+
+      - name: "order_item_id"
+        data_type: "bigint"
+        role: identifier
+        label: "Order Item ID"
+        description: "Surrogate primary key for an order line item. Has no business meaning."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "order_id"
+        data_type: "bigint"
+        role: identifier
+        label: "Order ID"
+        description: "Foreign key to ecommerce.orders."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        usage_profile:
+          join_frequency: 0.95
+          select_frequency: 0.45
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "product_id"
+        data_type: "integer"
+        role: identifier
+        label: "Product ID"
+        description: "Foreign key to ecommerce.products."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        usage_profile:
+          join_frequency: 0.82
+          group_by_frequency: 0.51
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "quantity"
+        data_type: "integer"
+        role: measure
+        label: "Quantity"
+        description: "Number of units of this product purchased. Always a positive integer."
+        nullable: false
+        cardinality_category: low
+        example_values: ["1", "2", "3"]
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "unit_price"
+        data_type: "numeric(10,2)"
+        role: measure
+        label: "Unit Price (USD)"
+        description: >
+          Price per unit in USD captured at the moment the order was placed.
+          This value is immutable — it does not change if the product catalogue
+          price is updated later. This is the authoritative field for revenue
+          calculations; never use products.price for historical revenue.
+        nullable: false
+        cardinality_category: high
+        example_values: ["29.99", "89.95", "149.00"]
+        difficulty: context_dependent
+        usage_profile:
+          select_frequency: 0.71
+          where_frequency: 0.08
+        provenance:
+          source_type: llm_inferred
+          agent: "strata-annotator-v1"
+          confidence: 0.68
+          human_reviewed: true
+
+      - name: "unit_cost"
+        data_type: "numeric(10,2)"
+        role: measure
+        label: "Unit Cost (USD)"
+        description: >
+          Cost of goods sold per unit in USD, populated from the matched supplier
+          invoice. NULL for approximately 4% of items where the supplier invoice
+          has not yet been matched. Always exclude NULL unit_cost rows from margin
+          calculations and document the exclusion in the query output.
+        nullable: true
+        cardinality_category: high
+        example_values: ["14.50", "42.00", "75.00"]
+        difficulty: domain_dependent
+        provenance:
+          source_type: llm_inferred
+          agent: "strata-annotator-v1"
+          confidence: 0.61
+          human_reviewed: false
+
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  # ---- inventory ----------------------------------------------------------
+
+  - model_id: "inventory"
+    name: "inventory"
+    label: "Inventory"
+    description: >
+      Current stock-on-hand per product per warehouse. One row per product-warehouse
+      combination. Updated in real time by the warehouse management system. A negative
+      quantity_on_hand is legitimate and indicates accepted backorders. Do not derive
+      stock levels from order_items — always use this table for inventory queries.
+    physical_source:
+      schema: "ecommerce"
+      table: "inventory"
+    primary_key:
+      - "product_id"
+      - "warehouse_id"
+    ddl_fingerprint: "sha256:5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6"
+    row_count_estimate: 36000
+    columns:
+
+      - name: "product_id"
+        data_type: "integer"
+        role: identifier
+        label: "Product ID"
+        description: "Foreign key to ecommerce.products. Part of the composite primary key."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "warehouse_id"
+        data_type: "integer"
+        role: identifier
+        label: "Warehouse ID"
+        description: "Identifier for the warehouse location. Part of the composite primary key."
+        nullable: false
+        cardinality_category: low
+        example_values: ["1", "2", "3"]
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: "quantity_on_hand"
+        data_type: "integer"
+        role: measure
+        label: "Quantity On Hand"
+        description: >
+          Current stock level for this product at this warehouse. Can be negative
+          when backorders are accepted before stock arrives. Do not treat negative
+          values as data errors. Aggregate across warehouse_id to get total stock
+          for a product.
+        nullable: false
+        cardinality_category: high
+        example_values: ["-5", "0", "120", "850"]
+        difficulty: context_dependent
+        provenance:
+          source_type: llm_inferred
+          agent: "strata-annotator-v1"
+          confidence: 0.74
+          human_reviewed: false
+
+      - name: "updated_at"
+        data_type: "timestamptz"
+        role: timestamp
+        label: "Last Updated"
+        description: "Timestamp of the most recent stock adjustment, in UTC."
+        nullable: false
+        cardinality_category: high
+        example_values: []
+        difficulty: self_evident
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+# ---------------------------------------------------------------------------
+# RELATIONSHIPS
+# ---------------------------------------------------------------------------
+
+relationships:
+
+  - relationship_id: "orders_to_customers"
+    from_model: "orders"
+    from_column: "customer_id"
+    to_model: "customers"
+    to_column: "customer_id"
+    relationship_type: many_to_one
+    join_condition: "orders.customer_id = customers.customer_id AND customers.deleted_at IS NULL"
+    semantic_role: >
+      Links an order to the registered customer who placed it. NULL customer_id on orders
+      indicates a guest checkout — this join will exclude guest orders. Include the
+      deleted_at IS NULL guard to avoid joining to erased customer records.
+    always_valid: false
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: true
+
+  - relationship_id: "order_items_to_orders"
+    from_model: "order_items"
+    from_column: "order_id"
+    to_model: "orders"
+    to_column: "order_id"
+    relationship_type: many_to_one
+    join_condition: "order_items.order_id = orders.order_id"
+    semantic_role: "Links each line item to its parent order header."
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  - relationship_id: "order_items_to_products"
+    from_model: "order_items"
+    from_column: "product_id"
+    to_model: "products"
+    to_column: "product_id"
+    relationship_type: many_to_one
+    join_condition: "order_items.product_id = products.product_id"
+    semantic_role: "Links each order line item to the product catalogue entry."
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  - relationship_id: "inventory_to_products"
+    from_model: "inventory"
+    from_column: "product_id"
+    to_model: "products"
+    to_column: "product_id"
+    relationship_type: many_to_one
+    join_condition: "inventory.product_id = products.product_id"
+    semantic_role: "Links inventory stock records to the product catalogue."
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+# ---------------------------------------------------------------------------
+# METRICS
+# ---------------------------------------------------------------------------
+
+metrics:
+
+  - metric_id: "revenue"
+    name: "revenue"
+    label: "Revenue (USD)"
+    description: >
+      Total revenue in USD. Defined as the sum of unit_price × quantity across all
+      order_items belonging to orders with a non-cancelled, non-refunded status.
+      Always use this metric definition — do not sum orders.total_amount, which is
+      a denormalised field that disagrees with line-level data when promotions apply.
+    expression: "SUM(order_items.unit_price * order_items.quantity)"
+    aggregation: sum
+    default_time_dimension:
+      model: "orders"
+      column: "created_at"
+    valid_dimensions:
+      - model: "products"
+        column: "category"
+      - model: "orders"
+        column: "status"
+      - model: "orders"
+        column: "shipping_country_code"
+      - model: "customers"
+        column: "tier"
+      - model: "customers"
+        column: "country_code"
+    invalid_dimensions:
+      - model: "customers"
+        column: "email"
+        reason: "PII — must not appear in group-by outputs."
+      - model: "customers"
+        column: "name"
+        reason: "PII — must not appear in group-by outputs."
+    required_filters:
+      - expression: "orders.status NOT IN ('cancelled', 'refunded')"
+        reason: >
+          Revenue must exclude cancelled and refunded orders. Omitting this filter
+          inflates revenue figures and is the most common agent mistake on this database.
+    additivity: fully_additive
+    provenance:
+      source_type: user_defined
+      confidence: 1.0
+      human_reviewed: true
+
+  - metric_id: "order_count"
+    name: "order_count"
+    label: "Order Count"
+    description: >
+      Number of distinct orders placed. Counts all orders including guest checkouts.
+      Apply status filters explicitly when you want only completed or confirmed orders.
+    expression: "orders.order_id"
+    aggregation: count_distinct
+    default_time_dimension:
+      model: "orders"
+      column: "created_at"
+    valid_dimensions:
+      - model: "orders"
+        column: "status"
+      - model: "orders"
+        column: "shipping_country_code"
+      - model: "customers"
+        column: "tier"
+    required_filters:
+      - expression: "orders.status NOT IN ('cancelled', 'refunded')"
+        reason: >
+          Default order count excludes cancelled and refunded orders to align with
+          business definition of a 'completed' order. Override this filter explicitly
+          if all lifecycle stages are needed.
+    additivity: fully_additive
+    provenance:
+      source_type: log_inferred
+      source_ref: "query_log_2026_q1.jsonl"
+      confidence: 0.88
+      human_reviewed: false
+
+  - metric_id: "gross_margin"
+    name: "gross_margin"
+    label: "Gross Margin (USD)"
+    description: >
+      Gross margin in USD. Defined as revenue minus cost of goods sold:
+      SUM((unit_price - unit_cost) * quantity). Rows where unit_cost IS NULL are
+      excluded from this calculation. The margin figure will therefore undercount
+      total margin when cost data is missing — document this in any report output.
+    expression: "SUM((order_items.unit_price - order_items.unit_cost) * order_items.quantity)"
+    aggregation: sum
+    default_time_dimension:
+      model: "orders"
+      column: "created_at"
+    valid_dimensions:
+      - model: "products"
+        column: "category"
+      - model: "orders"
+        column: "shipping_country_code"
+    required_filters:
+      - expression: "orders.status NOT IN ('cancelled', 'refunded')"
+        reason: "Exclude cancelled and refunded orders from margin calculations."
+      - expression: "order_items.unit_cost IS NOT NULL"
+        reason: >
+          Rows with NULL unit_cost cannot contribute to margin calculations.
+          Excluding them ensures the result is not silently incorrect due to
+          NULL arithmetic. Always note the exclusion in query output.
+    additivity: fully_additive
+    provenance:
+      source_type: llm_inferred
+      agent: "strata-annotator-v1"
+      confidence: 0.71
+      human_reviewed: true
+
+  - metric_id: "active_customer_count"
+    name: "active_customer_count"
+    label: "Active Customer Count"
+    description: >
+      Number of distinct registered customers who have placed at least one
+      non-cancelled, non-refunded order in the period. Excludes guest checkouts
+      (NULL customer_id) and soft-deleted customer accounts.
+    expression: "orders.customer_id"
+    aggregation: count_distinct
+    default_time_dimension:
+      model: "orders"
+      column: "created_at"
+    valid_dimensions:
+      - model: "customers"
+        column: "tier"
+      - model: "customers"
+        column: "country_code"
+      - model: "orders"
+        column: "shipping_country_code"
+    required_filters:
+      - expression: "orders.customer_id IS NOT NULL"
+        reason: "Excludes guest checkouts, which have no customer account to count."
+      - expression: "orders.status NOT IN ('cancelled', 'refunded')"
+        reason: "Only count customers who completed at least one order."
+      - expression: "customers.deleted_at IS NULL"
+        reason: "Exclude soft-deleted customer records."
+    additivity: semi_additive
+    provenance:
+      source_type: user_defined
+      confidence: 1.0
+      human_reviewed: true
+
+# ---------------------------------------------------------------------------
+# CONCEPTS
+# ---------------------------------------------------------------------------
+
+concepts:
+
+  - concept_id: "revenue_concept"
+    label: "Revenue"
+    description: >
+      Total receipts from product sales, net of cancellations and refunds.
+      Computed from order line items, not from the denormalised order total field.
+    definition_sql: >
+      SELECT SUM(oi.unit_price * oi.quantity)
+      FROM ecommerce.order_items oi
+      JOIN ecommerce.orders o ON oi.order_id = o.order_id
+      WHERE o.status NOT IN ('cancelled', 'refunded')
+    broader: null
+    maps_to_models:
+      - "orders"
+      - "order_items"
+    maps_to_columns:
+      - model: "order_items"
+        column: "unit_price"
+      - model: "order_items"
+        column: "quantity"
+    provenance:
+      source_type: user_defined
+      confidence: 1.0
+      human_reviewed: true
+
+  - concept_id: "gross_margin_concept"
+    label: "Gross Margin"
+    description: >
+      Revenue minus cost of goods sold. Rows where unit_cost is NULL are excluded.
+      Gross margin percentage = gross_margin / revenue × 100.
+    broader: "revenue_concept"
+    maps_to_models:
+      - "order_items"
+    maps_to_columns:
+      - model: "order_items"
+        column: "unit_price"
+      - model: "order_items"
+        column: "unit_cost"
+      - model: "order_items"
+        column: "quantity"
+    provenance:
+      source_type: user_defined
+      confidence: 1.0
+      human_reviewed: true

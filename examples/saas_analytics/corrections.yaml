@@ -1,0 +1,119 @@
+smif_version: "0.1.0"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SaaS Analytics — Corrections Overlay
+#
+# This file contains human-authored corrections to the inferred semantic.yaml.
+# These corrections take unconditional precedence at serve time.
+# Re-running inference (strata init) will never modify this file.
+#
+# Corrections in this file:
+#   corr_001  — Description override on subscriptions.mrr_usd (LLM missed the
+#               semi-additive caveat about summing across time periods)
+#   corr_002  — Description override on subscriptions.ended_at (LLM incorrectly
+#               suggested filtering ended_at IS NULL for active subscriptions)
+#   corr_003  — Suppression of users.email (PII, must not be served to agents)
+#   corr_004  — confidence_override on active_user concept (human-authored,
+#               should be 1.0)
+#   corr_005  — llm_suggested: pending review (agent proposed adding a
+#               required filter to avg_session_duration for minimum duration)
+# ─────────────────────────────────────────────────────────────────────────────
+
+corrections:
+
+  - correction_id: "corr_001"
+    target_type: column
+    target_id: "subscriptions.mrr_usd"
+    correction_type: description_override
+    new_value: >
+      Monthly recurring revenue in USD for this subscription period. Normalised
+      to a monthly amount — annual plans are divided by 12. For current total MRR,
+      filter status = 'active' AND sum. Do not sum across multiple months without
+      explicit user instruction: summing across months gives cumulative contract
+      value (total revenue collected), not MRR (current run-rate). MRR is a
+      point-in-time stock metric. Free plan subscriptions have mrr_usd = 0.00;
+      include them if counting subscribers but exclude them (pl.tier != 'free')
+      if computing paid MRR.
+    reason: >
+      LLM-inferred description omitted the critical caveat about cross-time
+      summation. Agents were summing mrr_usd across all months in a date range
+      and reporting the result as "MRR", which is cumulative contract value —
+      a different and much larger number. The free-plan clarification was also
+      missing, causing agents to include $0 rows in paid MRR figures.
+    source: user
+    status: approved
+    author: "finance@saasco.io"
+    timestamp: "2026-03-25T10:14:00Z"
+
+  - correction_id: "corr_002"
+    target_type: column
+    target_id: "subscriptions.ended_at"
+    correction_type: description_override
+    new_value: >
+      UTC timestamp when this subscription period ended. NULL for the currently
+      active subscription row. Do not use ended_at IS NULL as the sole filter for
+      active subscriptions — use status = 'active' instead. The application layer
+      maintains status through grace periods and dunning flows where ended_at may
+      be set but the subscription is still collecting revenue (status = 'paused').
+      ended_at IS NULL and status = 'active' together produce the most accurate
+      active-subscription filter, but status alone is acceptable when a single
+      condition is required.
+    reason: >
+      The inferred description suggested using ended_at IS NULL to identify active
+      subscriptions. This is incorrect during dunning grace periods where ended_at
+      is populated but the subscription is still technically active and contributing
+      to MRR. Agents using ended_at IS NULL were undercounting active subscriptions
+      during month-end grace periods, producing MRR figures 3-7% below actuals.
+    source: user
+    status: approved
+    author: "finance@saasco.io"
+    timestamp: "2026-03-25T10:22:00Z"
+
+  - correction_id: "corr_003"
+    target_type: column
+    target_id: "users.email"
+    correction_type: suppress
+    new_value: true
+    reason: >
+      email is a PII field. It must not be exposed to LLM agents under any
+      circumstances. Suppressed permanently. Any use case requiring email lookup
+      must go through the internal user management API with appropriate
+      authorisation, not through the semantic layer.
+    source: user
+    status: approved
+    author: "privacy@saasco.io"
+    timestamp: "2026-03-24T16:30:00Z"
+
+  - correction_id: "corr_004"
+    target_type: concept
+    target_id: "active_user"
+    correction_type: confidence_override
+    new_value: 1.0
+    reason: >
+      The active_user concept and its DAU definition were human-authored in
+      strata.md and hand-verified against the production analytics dashboard.
+      The event_type = 'user_active' sentinel has been the canonical DAU
+      definition since the product launched. The inferred confidence of 0.84
+      understates the actual reliability.
+    source: user
+    status: approved
+    author: "growth@saasco.io"
+    timestamp: "2026-03-25T11:05:00Z"
+
+  - correction_id: "corr_005"
+    target_type: metric
+    target_id: "avg_session_duration"
+    correction_type: required_filter_add
+    new_value: "sessions.duration_seconds > 5"
+    reason: >
+      Agent observed that very short sessions (under 5 seconds) exist in the
+      table — these are phantom sessions created by load balancer health checks
+      and crawler traffic that reach the session initialisation endpoint but
+      produce no real user events. These inflate session counts and artificially
+      depress average session duration. Suggested adding duration_seconds > 5
+      to match the behaviour of the product analytics dashboard.
+    source: llm_suggested
+    status: pending
+    session_id: "session_a7f4c3b2"
+    author: "strata-agent"
+    timestamp: "2026-03-28T09:15:00Z"

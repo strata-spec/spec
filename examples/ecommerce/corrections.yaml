@@ -1,0 +1,124 @@
+smif_version: "0.1.1"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# E-commerce Platform — Corrections Overlay
+#
+# This file contains human-authored corrections to the inferred semantic.yaml.
+# These corrections take unconditional precedence at serve time.
+# Re-running inference (strata init) will never modify this file.
+#
+# Corrections in this file:
+#   corr_001  — Description override on order_items.unit_cost (LLM understated
+#               the business impact of NULL values in margin calculations)
+#   corr_002  — Role override on orders.total_amount (mis-classified as a
+#               reliable revenue measure; should be flagged as unreliable)
+#   corr_003  — Description override on customers.customer_since (LLM conflated
+#               account creation date with first-purchase date)
+#   corr_004  — Suppression of customers.email (PII, must not be served to agents)
+#   corr_005  — Suppression of customers.phone (PII, must not be served to agents)
+# ─────────────────────────────────────────────────────────────────────────────
+
+corrections:
+
+  - correction_id: "corr_001"
+    target_type: column
+    target_id: "order_items.unit_cost"
+    correction_type: description
+    new_value: >
+      Cost of goods sold per unit in USD, populated from the matched supplier invoice at
+      the time of shipment. NULL for approximately 4% of items where the supplier invoice
+      has not yet been reconciled by the finance team (typical lag is 3–5 business days
+      post-shipment for domestic suppliers, up to 30 days for international suppliers).
+
+      Critical: NULL unit_cost rows must be excluded from any gross margin calculation
+      because NULL arithmetic silently produces NULL results — SUM((unit_price - unit_cost)
+      * quantity) will return NULL for the entire result set if even one row has a NULL
+      unit_cost, unless you filter them out first. Always add WHERE unit_cost IS NOT NULL
+      and note in the query output that the margin figure excludes unmatched cost rows.
+
+      Do not substitute 0 for NULL — a zero cost is a valid (and rare) scenario for
+      promotional items. Treating NULL as zero would inflate margin figures.
+    reason: >
+      The LLM-inferred description correctly identified that unit_cost can be NULL but
+      failed to explain the magnitude of the impact on SQL generation. Agents were
+      generating SUM expressions without a NULL guard, producing NULL totals on margin
+      queries without any indication of why. The correction adds explicit SQL guidance
+      and the critical warning about the difference between NULL and zero cost.
+    source: user_defined
+    status: approved
+    author: "finance-analytics@example.com"
+    timestamp: "2026-03-25T14:30:00Z"
+
+  - correction_id: "corr_002"
+    target_type: column
+    target_id: "orders.total_amount"
+    correction_type: role
+    new_value: "dimension"
+    reason: >
+      orders.total_amount was inferred with role 'measure', implying it is a reliable
+      numeric field for aggregation. In practice this column is a denormalised convenience
+      value that disagrees with the sum of order_items when promotions are applied — a
+      known data quality issue being addressed in Q3. Reclassifying to 'dimension' signals
+      to agents that this column should not be used as an aggregation target. The canonical
+      revenue metric is defined in the metrics section using order_items.unit_price *
+      order_items.quantity instead.
+    source: user_defined
+    status: approved
+    author: "data-team@example.com"
+    timestamp: "2026-03-26T09:15:00Z"
+
+  - correction_id: "corr_003"
+    target_type: column
+    target_id: "customers.customer_since"
+    correction_type: description
+    new_value: >
+      Date the customer account was first created in the system, stored as a DATE in UTC.
+      This is the account registration date, not the date of the customer's first purchase.
+      A customer may register an account and place no orders for weeks or months.
+
+      For first-purchase cohort analysis, use MIN(orders.created_at) grouped by
+      orders.customer_id, not this column. For account-creation cohort analysis (e.g.,
+      "how many accounts created in January 2026 have placed at least one order?"),
+      this column is the correct time dimension.
+
+      Do not use this column as the time dimension for revenue metrics — orders.created_at
+      is the correct time dimension for all revenue and order-count metrics.
+    reason: >
+      Agents were using customer_since as the time dimension for revenue queries, producing
+      revenue-by-registration-date instead of revenue-by-order-date. The distinction matters
+      significantly for cohort analysis — a customer who registered in 2021 but placed an
+      order in 2026 would be attributed to 2021 in registration-date grouping. The corrected
+      description explicitly states the column's purpose and directs agents to orders.created_at
+      for revenue trending.
+    source: user_defined
+    status: approved
+    author: "analytics@example.com"
+    timestamp: "2026-03-27T11:00:00Z"
+
+  - correction_id: "corr_004"
+    target_type: column
+    target_id: "customers.email"
+    correction_type: suppress
+    new_value: true
+    reason: >
+      customers.email contains personal data (email address) subject to GDPR and CCPA.
+      It must not be exposed to LLM agents, appear in query outputs, or be used as a
+      filter or group-by value. Suppressed permanently. Any legitimate use of email data
+      requires a separate approved data access request through the privacy team.
+    source: user_defined
+    status: approved
+    author: "privacy@example.com"
+    timestamp: "2026-03-20T10:00:00Z"
+
+  - correction_id: "corr_005"
+    target_type: column
+    target_id: "customers.phone"
+    correction_type: suppress
+    new_value: true
+    reason: >
+      customers.phone contains personal data (phone number) subject to GDPR and CCPA.
+      Must not be exposed to LLM agents under any circumstances. Suppressed permanently.
+    source: user_defined
+    status: approved
+    author: "privacy@example.com"
+    timestamp: "2026-03-20T10:00:00Z"
